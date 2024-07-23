@@ -5,6 +5,7 @@ edition.workspace = true
 
 [features]
 parallel = ["rayon"]
+icicle_poc = ["icicle-cuda-runtime", "icicle-core", "icicle-m31"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -25,9 +26,9 @@ thiserror.workspace = true
 tracing.workspace = true
 rayon = { version = "1.10.0", optional = true }
 
-icicle-cuda-runtime = { git="https://github.com/ingonyama-zk/icicle.git" }
-icicle-core = { git="https://github.com/ingonyama-zk/icicle.git" }
-icicle-m31 = { git="https://github.com/ingonyama-zk/icicle.git" }
+icicle-cuda-runtime = { git = "https://github.com/ingonyama-zk/icicle.git", optional = true }
+icicle-core = { git = "https://github.com/ingonyama-zk/icicle.git", optional = true }
+icicle-m31 = { git = "https://github.com/ingonyama-zk/icicle.git", optional = true }
 
 [dev-dependencies]
 aligned = "0.4.2"
@@ -95,3 +96,7 @@ name = "prefix_sum"
 [[bench]]
 harness = false
 name = "quotients"
+
+[[bench]]
+harness = false
+name = "accumulate"
