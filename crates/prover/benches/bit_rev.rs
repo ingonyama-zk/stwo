@@ -4,11 +4,15 @@ use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use itertools::Itertools;
 use stwo_prover::core::fields::m31::BaseField;
 
+const LOG_SIZE: usize = 25;
+const SIZE: usize = 1 << LOG_SIZE;
+
 pub fn cpu_bit_rev(c: &mut Criterion) {
     use stwo_prover::core::utils::bit_reverse;
-    const SIZE: usize = 1 << 24;
     let data = (0..SIZE).map(BaseField::from).collect_vec();
-    c.bench_function("cpu bit_rev 24bit", |b| {
+
+    let bench_id = &format!("cpu bit_rev 2^{LOG_SIZE}");
+    c.bench_function(bench_id, |b| {
         b.iter_batched(
             || data.clone(),
             |mut data| bit_reverse(&mut data),
@@ -20,9 +24,10 @@ pub fn cpu_bit_rev(c: &mut Criterion) {
 pub fn simd_bit_rev(c: &mut Criterion) {
     use stwo_prover::core::backend::simd::bit_reverse::bit_reverse_m31;
     use stwo_prover::core::backend::simd::column::BaseFieldVec;
-    const SIZE: usize = 1 << 24;
     let data = (0..SIZE).map(BaseField::from).collect::<BaseFieldVec>();
-    c.bench_function("simd bit_rev 24bit", |b| {
+
+    let bench_id = &format!("simd bit_rev 2^{LOG_SIZE}");
+    c.bench_function(bench_id, |b| {
         b.iter_batched(
             || data.data.clone(),
             |mut data| bit_reverse_m31(&mut data),

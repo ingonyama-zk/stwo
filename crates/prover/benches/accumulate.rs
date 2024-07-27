@@ -4,7 +4,7 @@ use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use stwo_prover::core::air::accumulation::AccumulationOps;
 use stwo_prover::core::fields::m31::BaseField;
 use stwo_prover::core::fields::secure_column::SecureColumn;
-const LOG_SIZE: usize = 24;
+const LOG_SIZE: usize = 25;
 const SIZE: usize = 1 << LOG_SIZE;
 
 pub fn cpu_accumulate(c: &mut Criterion) {
