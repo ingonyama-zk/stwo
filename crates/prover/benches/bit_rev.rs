@@ -4,7 +4,7 @@ use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use itertools::Itertools;
 use stwo_prover::core::fields::m31::BaseField;
 
-const LOG_SIZE: usize = 25;
+const LOG_SIZE: usize = 28;
 const SIZE: usize = 1 << LOG_SIZE;
 
 pub fn cpu_bit_rev(c: &mut Criterion) {
