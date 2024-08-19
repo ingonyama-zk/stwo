@@ -26,9 +26,9 @@ thiserror.workspace = true
 tracing.workspace = true
 rayon = { version = "1.10.0", optional = true }
 
-icicle-cuda-runtime = { git = "https://github.com/ingonyama-zk/icicle.git", optional = true }
-icicle-core = { git = "https://github.com/ingonyama-zk/icicle.git", optional = true }
-icicle-m31 = { git = "https://github.com/ingonyama-zk/icicle.git", optional = true }
+icicle-cuda-runtime = { git = "https://github.com/ingonyama-zk/icicle.git", optional = true, branch = "dev/vhnat/stwo/accu-bitrev-bench-wip"}
+icicle-core = { git = "https://github.com/ingonyama-zk/icicle.git", optional = true, branch = "dev/vhnat/stwo/accu-bitrev-bench-wip" }
+icicle-m31 = { git = "https://github.com/ingonyama-zk/icicle.git", optional = true, branch = "dev/vhnat/stwo/accu-bitrev-bench-wip" }
 
 [dev-dependencies]
 aligned = "0.4.2"
