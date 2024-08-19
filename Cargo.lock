@@ -1265,6 +1265,7 @@ dependencies = [
  "num-traits",
  "rand",
  "rayon",
+ "serde",
  "starknet-crypto",
  "starknet-ff",
  "test-log",
