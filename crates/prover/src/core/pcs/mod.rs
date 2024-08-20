@@ -11,6 +11,15 @@ pub mod quotients;
 mod utils;
 mod verifier;
 
-pub use self::prover::{CommitmentSchemeProof, CommitmentSchemeProver, CommitmentTreeProver};
+pub use self::prover::{
+    CommitmentSchemeProof, CommitmentSchemeProver, CommitmentTreeProver, TreeBuilder,
+};
 pub use self::utils::TreeVec;
 pub use self::verifier::CommitmentSchemeVerifier;
+
+#[derive(Copy, Debug, Clone)]
+pub struct TreeColumnSpan {
+    pub tree_index: usize,
+    pub col_start: usize,
+    pub col_end: usize,
+}

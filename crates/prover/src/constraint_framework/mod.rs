@@ -1,15 +1,18 @@
 /// ! This module contains helpers to express and use constraints for components.
 mod assert;
+mod component;
 pub mod constant_columns;
 mod info;
+pub mod logup;
 mod point;
 mod simd_domain;
 
 use std::array;
 use std::fmt::Debug;
-use std::ops::{Add, AddAssign, Mul, Sub};
+use std::ops::{Add, AddAssign, Mul, Neg, Sub};
 
 pub use assert::{assert_constraints, AssertEvaluator};
+pub use component::FrameworkComponent;
 pub use info::InfoEvaluator;
 use num_traits::{One, Zero};
 pub use point::PointEvaluator;
@@ -29,6 +32,8 @@ pub trait EvalAtRow {
     type F: FieldExpOps
         + Copy
         + Debug
+        + Zero
+        + Neg<Output = Self::F>
         + AddAssign<Self::F>
         + AddAssign<BaseField>
         + Add<Self::F, Output = Self::F>
@@ -36,6 +41,7 @@ pub trait EvalAtRow {
         + Mul<BaseField, Output = Self::F>
         + Add<SecureField, Output = Self::EF>
         + Mul<SecureField, Output = Self::EF>
+        + Neg<Output = Self::F>
         + From<BaseField>;
 
     /// A field type representing the closure of `F` with multiplying by [SecureField]. Constraints
@@ -44,13 +50,17 @@ pub trait EvalAtRow {
         + Copy
         + Debug
         + Zero
+        + From<Self::F>
+        + Neg<Output = Self::EF>
         + Add<SecureField, Output = Self::EF>
         + Sub<SecureField, Output = Self::EF>
         + Mul<SecureField, Output = Self::EF>
         + Add<Self::F, Output = Self::EF>
         + Mul<Self::F, Output = Self::EF>
         + Sub<Self::EF, Output = Self::EF>
-        + Mul<Self::EF, Output = Self::EF>;
+        + Mul<Self::EF, Output = Self::EF>
+        + From<SecureField>
+        + From<Self::F>;
 
     /// Returns the next mask value for the first interaction at offset 0.
     fn next_trace_mask(&mut self) -> Self::F {

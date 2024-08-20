@@ -1,3 +1,5 @@
+pub use components::{ComponentProvers, Components};
+
 use self::accumulation::{DomainEvaluationAccumulator, PointEvaluationAccumulator};
 use super::backend::Backend;
 use super::circle::CirclePoint;
@@ -6,14 +8,11 @@ use super::fields::qm31::SecureField;
 use super::pcs::TreeVec;
 use super::poly::circle::{CircleEvaluation, CirclePoly};
 use super::poly::BitReversedOrder;
-use super::prover::VerificationError;
 use super::{ColumnVec, InteractionElements, LookupValues};
 
 pub mod accumulation;
-mod air_ext;
+mod components;
 pub mod mask;
-
-pub use air_ext::{AirExt, AirProverExt};
 
 /// Arithmetic Intermediate Representation (AIR).
 /// An Air instance is assumed to already contain all the information needed to
@@ -23,13 +22,10 @@ pub use air_ext::{AirExt, AirProverExt};
 // TODO(spapini): consider renaming this struct.
 pub trait Air {
     fn components(&self) -> Vec<&dyn Component>;
-
-    /// Verifies the lookups done in the Air.
-    fn verify_lookups(&self, lookup_values: &LookupValues) -> Result<(), VerificationError>;
 }
 
 pub trait AirProver<B: Backend>: Air {
-    fn prover_components(&self) -> Vec<&dyn ComponentProver<B>>;
+    fn component_provers(&self) -> Vec<&dyn ComponentProver<B>>;
 }
 
 /// A component is a set of trace columns of various sizes along with a set of

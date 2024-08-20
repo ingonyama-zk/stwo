@@ -21,10 +21,15 @@ pub fn cpu_bit_rev(c: &mut Criterion) {
     });
 }
 
+// use stwo_prover::core::backend::simd::column::BaseColumn;
+// const SIZE: usize = 1 << 26;
+// let data = (0..SIZE).map(BaseField::from).collect::<BaseColumn>();
+// c.bench_function("simd bit_rev 26bit", |b| {
+
 pub fn simd_bit_rev(c: &mut Criterion) {
     use stwo_prover::core::backend::simd::bit_reverse::bit_reverse_m31;
-    use stwo_prover::core::backend::simd::column::BaseFieldVec;
-    let data = (0..SIZE).map(BaseField::from).collect::<BaseFieldVec>();
+    use stwo_prover::core::backend::simd::column::BaseColumn;
+    let data = (0..SIZE).map(BaseField::from).collect::<BaseColumn>();
 
     let bench_id = &format!("simd bit_rev 2^{LOG_SIZE}");
     c.bench_function(bench_id, |b| {

@@ -1,31 +1,28 @@
 //! AIR for Poseidon2 hash function from <https://eprint.iacr.org/2023/323.pdf>.
 
-use std::array;
 use std::ops::{Add, AddAssign, Mul, Sub};
 
 use itertools::Itertools;
+use num_traits::One;
 use tracing::{span, Level};
 
-use crate::constraint_framework::{EvalAtRow, PointEvaluator, SimdDomainEvaluator};
-use crate::core::air::accumulation::{DomainEvaluationAccumulator, PointEvaluationAccumulator};
-use crate::core::air::mask::fixed_mask_points;
-use crate::core::air::{Air, AirProver, Component, ComponentProver, ComponentTrace};
-use crate::core::backend::simd::m31::{PackedBaseField, PackedM31, LOG_N_LANES};
+use crate::constraint_framework::logup::{LogupAtRow, LogupTraceGenerator, LookupElements};
+use crate::constraint_framework::{EvalAtRow, FrameworkComponent};
+use crate::core::backend::simd::column::BaseColumn;
+use crate::core::backend::simd::m31::{PackedBaseField, LOG_N_LANES};
+use crate::core::backend::simd::qm31::PackedSecureField;
 use crate::core::backend::simd::SimdBackend;
 use crate::core::backend::{Col, Column};
 use crate::core::channel::Blake2sChannel;
-use crate::core::circle::CirclePoint;
-use crate::core::constraints::coset_vanishing;
 use crate::core::fields::m31::BaseField;
 use crate::core::fields::qm31::SecureField;
 use crate::core::fields::FieldExpOps;
-use crate::core::pcs::TreeVec;
+use crate::core::pcs::CommitmentSchemeProver;
 use crate::core::poly::circle::{CanonicCoset, CircleEvaluation, PolyOps};
 use crate::core::poly::BitReversedOrder;
-use crate::core::prover::VerificationError;
-use crate::core::utils::bit_reverse;
-use crate::core::{ColumnVec, InteractionElements, LookupValues};
-use crate::trace_generation::{AirTraceGenerator, AirTraceVerifier, ComponentTraceGenerator};
+use crate::core::prover::{prove, StarkProof, LOG_BLOWUP_FACTOR};
+use crate::core::vcs::blake2_merkle::Blake2sMerkleHasher;
+use crate::core::{ColumnVec, InteractionElements};
 
 const N_LOG_INSTANCES_PER_ROW: usize = 3;
 const N_INSTANCES_PER_ROW: usize = 1 << N_LOG_INSTANCES_PER_ROW;
@@ -42,104 +39,28 @@ const EXTERNAL_ROUND_CONSTS: [[BaseField; N_STATE]; 2 * N_HALF_FULL_ROUNDS] =
 const INTERNAL_ROUND_CONSTS: [BaseField; N_PARTIAL_ROUNDS] =
     [BaseField::from_u32_unchecked(1234); N_PARTIAL_ROUNDS];
 
+pub type PoseidonElements = LookupElements<{ N_STATE * 2 }>;
+
 #[derive(Clone)]
 pub struct PoseidonComponent {
     pub log_n_rows: u32,
+    pub lookup_elements: PoseidonElements,
+    pub claimed_sum: SecureField,
 }
-
-impl PoseidonComponent {
-    pub fn log_column_size(&self) -> u32 {
+impl FrameworkComponent for PoseidonComponent {
+    fn log_size(&self) -> u32 {
         self.log_n_rows
     }
-
-    pub fn n_columns(&self) -> usize {
-        N_COLUMNS
-    }
-}
-
-#[derive(Clone)]
-pub struct PoseidonAir {
-    pub component: PoseidonComponent,
-}
-
-impl Air for PoseidonAir {
-    fn components(&self) -> Vec<&dyn Component> {
-        vec![&self.component]
-    }
-
-    fn verify_lookups(&self, _lookup_values: &LookupValues) -> Result<(), VerificationError> {
-        Ok(())
-    }
-}
-
-impl AirTraceVerifier for PoseidonAir {
-    fn interaction_elements(&self, _channel: &mut Blake2sChannel) -> InteractionElements {
-        InteractionElements::default()
-    }
-}
-
-impl AirTraceGenerator<SimdBackend> for PoseidonAir {
-    fn interact(
-        &self,
-        _trace: &ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
-        _elements: &InteractionElements,
-    ) -> Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>> {
-        vec![]
-    }
-
-    fn to_air_prover(&self) -> impl AirProver<SimdBackend> {
-        self.clone()
-    }
-
-    fn composition_log_degree_bound(&self) -> u32 {
-        self.component.max_constraint_log_degree_bound()
-    }
-}
-
-impl Component for PoseidonComponent {
-    fn n_constraints(&self) -> usize {
-        (N_COLUMNS_PER_REP - N_STATE) * N_INSTANCES_PER_ROW
-    }
-
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_column_size() + LOG_EXPAND
+        self.log_n_rows + LOG_EXPAND
     }
-
-    fn trace_log_degree_bounds(&self) -> TreeVec<ColumnVec<u32>> {
-        TreeVec::new(vec![
-            vec![self.log_column_size(); N_COLUMNS],
-            vec![self.log_column_size()],
-        ])
-    }
-
-    fn mask_points(
-        &self,
-        point: CirclePoint<SecureField>,
-    ) -> TreeVec<ColumnVec<Vec<CirclePoint<SecureField>>>> {
-        TreeVec::new(vec![
-            fixed_mask_points(&vec![vec![0_usize]; N_COLUMNS], point),
-            vec![vec![point]],
-        ])
-    }
-
-    fn evaluate_constraint_quotients_at_point(
-        &self,
-        point: CirclePoint<SecureField>,
-        mask: &TreeVec<Vec<Vec<SecureField>>>,
-        evaluation_accumulator: &mut PointEvaluationAccumulator,
-        _interaction_elements: &InteractionElements,
-        _lookup_values: &LookupValues,
-    ) {
-        let constraint_zero_domain = CanonicCoset::new(self.log_column_size()).coset;
-        let denom = coset_vanishing(constraint_zero_domain, point);
-        let denom_inverse = denom.inverse();
-        let mut poseidon_eval = PoseidonEval {
-            eval: PointEvaluator::new(mask.as_ref(), evaluation_accumulator, denom_inverse),
+    fn evaluate<E: EvalAtRow>(&self, eval: E) -> E {
+        let poseidon_eval = PoseidonEval {
+            eval,
+            logup: LogupAtRow::new(1, self.claimed_sum, self.log_n_rows),
+            lookup_elements: &self.lookup_elements,
         };
-        for _ in 0..N_INSTANCES_PER_ROW {
-            poseidon_eval.eval();
-        }
-        assert_eq!(poseidon_eval.eval.col_index[0], N_COLUMNS);
+        poseidon_eval.eval()
     }
 }
 
@@ -212,68 +133,93 @@ fn pow5<F: FieldExpOps>(x: F) -> F {
     x4 * x
 }
 
-struct PoseidonEval<E: EvalAtRow> {
+struct PoseidonEval<'a, E: EvalAtRow> {
     eval: E,
+    logup: LogupAtRow<2, E>,
+    lookup_elements: &'a PoseidonElements,
 }
 
-impl<E: EvalAtRow> PoseidonEval<E> {
-    fn eval(&mut self) {
-        let mut state: [_; N_STATE] = std::array::from_fn(|_| self.eval.next_trace_mask());
+impl<'a, E: EvalAtRow> PoseidonEval<'a, E> {
+    fn eval(mut self) -> E {
+        for _ in 0..N_INSTANCES_PER_ROW {
+            let mut state: [_; N_STATE] = std::array::from_fn(|_| self.eval.next_trace_mask());
 
-        // 4 full rounds.
-        (0..N_HALF_FULL_ROUNDS).for_each(|round| {
-            (0..N_STATE).for_each(|i| {
-                state[i] += EXTERNAL_ROUND_CONSTS[round][i];
+            // Require state lookup.
+            self.logup
+                .push_lookup(&mut self.eval, E::EF::one(), &state, self.lookup_elements);
+
+            // 4 full rounds.
+            (0..N_HALF_FULL_ROUNDS).for_each(|round| {
+                (0..N_STATE).for_each(|i| {
+                    state[i] += EXTERNAL_ROUND_CONSTS[round][i];
+                });
+                apply_external_round_matrix(&mut state);
+                state = std::array::from_fn(|i| pow5(state[i]));
+                state.iter_mut().for_each(|s| {
+                    let m = self.eval.next_trace_mask();
+                    self.eval.add_constraint(*s - m);
+                    *s = m;
+                });
             });
-            apply_external_round_matrix(&mut state);
-            state = std::array::from_fn(|i| pow5(state[i]));
-            state.iter_mut().for_each(|s| {
+
+            // Partial rounds.
+            (0..N_PARTIAL_ROUNDS).for_each(|round| {
+                state[0] += INTERNAL_ROUND_CONSTS[round];
+                apply_internal_round_matrix(&mut state);
+                state[0] = pow5(state[0]);
                 let m = self.eval.next_trace_mask();
-                self.eval.add_constraint(*s - m);
-                *s = m;
+                self.eval.add_constraint(state[0] - m);
+                state[0] = m;
             });
-        });
 
-        // Partial rounds.
-        (0..N_PARTIAL_ROUNDS).for_each(|round| {
-            state[0] += INTERNAL_ROUND_CONSTS[round];
-            apply_internal_round_matrix(&mut state);
-            state[0] = pow5(state[0]);
-            let m = self.eval.next_trace_mask();
-            self.eval.add_constraint(state[0] - m);
-            state[0] = m;
-        });
+            // 4 full rounds.
+            (0..N_HALF_FULL_ROUNDS).for_each(|round| {
+                (0..N_STATE).for_each(|i| {
+                    state[i] += EXTERNAL_ROUND_CONSTS[round + N_HALF_FULL_ROUNDS][i];
+                });
+                apply_external_round_matrix(&mut state);
+                state = std::array::from_fn(|i| pow5(state[i]));
+                state.iter_mut().for_each(|s| {
+                    let m = self.eval.next_trace_mask();
+                    self.eval.add_constraint(*s - m);
+                    *s = m;
+                });
+            });
 
-        // 4 full rounds.
-        (0..N_HALF_FULL_ROUNDS).for_each(|round| {
-            (0..N_STATE).for_each(|i| {
-                state[i] += EXTERNAL_ROUND_CONSTS[round + N_HALF_FULL_ROUNDS][i];
-            });
-            apply_external_round_matrix(&mut state);
-            state = std::array::from_fn(|i| pow5(state[i]));
-            state.iter_mut().for_each(|s| {
-                let m = self.eval.next_trace_mask();
-                self.eval.add_constraint(*s - m);
-                *s = m;
-            });
-        });
+            // Provide state lookup.
+            self.logup
+                .push_lookup(&mut self.eval, -E::EF::one(), &state, self.lookup_elements);
+        }
+
+        self.logup.finalize(&mut self.eval);
+        self.eval
     }
 }
 
-impl AirProver<SimdBackend> for PoseidonAir {
-    fn prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
-        vec![&self.component]
-    }
+pub struct LookupData {
+    initial_state: [[BaseColumn; N_STATE]; N_INSTANCES_PER_ROW],
+    final_state: [[BaseColumn; N_STATE]; N_INSTANCES_PER_ROW],
 }
-
 pub fn gen_trace(
     log_size: u32,
-) -> ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>> {
+) -> (
+    ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
+    LookupData,
+) {
     let _span = span!(Level::INFO, "Generation").entered();
     assert!(log_size >= LOG_N_LANES);
     let mut trace = (0..N_COLUMNS)
         .map(|_| Col::<SimdBackend, BaseField>::zeros(1 << log_size))
         .collect_vec();
+    let mut lookup_data = LookupData {
+        initial_state: std::array::from_fn(|_| {
+            std::array::from_fn(|_| BaseColumn::zeros(1 << log_size))
+        }),
+        final_state: std::array::from_fn(|_| {
+            std::array::from_fn(|_| BaseColumn::zeros(1 << log_size))
+        }),
+    };
+
     for vec_index in 0..(1 << (log_size - LOG_N_LANES)) {
         // Initial state.
         let mut col_index = 0;
@@ -287,6 +233,10 @@ pub fn gen_trace(
                 trace[col_index].data[vec_index] = s;
                 col_index += 1;
             });
+            lookup_data.initial_state[rep_i]
+                .iter_mut()
+                .zip(state)
+                .for_each(|(res, state_i)| res.data[vec_index] = state_i);
 
             // 4 full rounds.
             (0..N_HALF_FULL_ROUNDS).for_each(|round| {
@@ -324,115 +274,109 @@ pub fn gen_trace(
                     col_index += 1;
                 });
             });
+
+            lookup_data.final_state[rep_i]
+                .iter_mut()
+                .zip(state)
+                .for_each(|(res, state_i)| res.data[vec_index] = state_i);
         }
     }
     let domain = CanonicCoset::new(log_size).circle_domain();
-    trace
+    let trace = trace
         .into_iter()
         .map(|eval| CircleEvaluation::<SimdBackend, _, BitReversedOrder>::new(domain, eval))
-        .collect_vec()
+        .collect_vec();
+    (trace, lookup_data)
 }
 
-impl ComponentTraceGenerator<SimdBackend> for PoseidonComponent {
-    type Component = Self;
-    type Inputs = ();
+pub fn gen_interaction_trace(
+    log_size: u32,
+    lookup_data: LookupData,
+    lookup_elements: &PoseidonElements,
+) -> (
+    ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
+    SecureField,
+) {
+    let _span = span!(Level::INFO, "Generate interaction trace").entered();
+    let mut logup_gen = LogupTraceGenerator::new(log_size);
 
-    fn add_inputs(&mut self, _inputs: &Self::Inputs) {
-        todo!()
-    }
-
-    fn write_trace(
-        _component_id: &str,
-        _registry: &mut crate::trace_generation::registry::ComponentGenerationRegistry,
-    ) -> ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>> {
-        todo!()
-    }
-
-    fn write_interaction_trace(
-        &self,
-        _trace: &ColumnVec<&CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
-        _elements: &InteractionElements,
-    ) -> ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>> {
-        vec![]
-    }
-
-    fn component(&self) -> Self::Component {
-        todo!()
-    }
-}
-
-impl ComponentProver<SimdBackend> for PoseidonComponent {
-    fn evaluate_constraint_quotients_on_domain(
-        &self,
-        trace: &ComponentTrace<'_, SimdBackend>,
-        evaluation_accumulator: &mut DomainEvaluationAccumulator<SimdBackend>,
-        _interaction_elements: &InteractionElements,
-        _lookup_values: &LookupValues,
-    ) {
-        assert_eq!(trace.polys[0].len(), self.n_columns());
-        let eval_domain = CanonicCoset::new(self.log_column_size() + LOG_EXPAND).circle_domain();
-
-        // Create a new evaluation.
-        let span = span!(Level::INFO, "Deg4 eval").entered();
-        let twiddles = SimdBackend::precompute_twiddles(
-            CanonicCoset::new(self.max_constraint_log_degree_bound())
-                .circle_domain()
-                .half_coset,
-        );
-        let trace_eval = trace
-            .polys
-            .as_cols_ref()
-            .map_cols(|col| col.evaluate_with_twiddles(eval_domain, &twiddles));
-        let trace_eval_ref = trace_eval.as_ref().map(|t| t.iter().collect_vec());
-        span.exit();
-
-        // Denoms.
-        let span = span!(Level::INFO, "Constraint eval denominators").entered();
-        let zero_domain = CanonicCoset::new(self.log_column_size()).coset;
-        let denoms_inv: [BaseField; 1 << LOG_EXPAND] =
-            array::from_fn(|i| coset_vanishing(zero_domain, eval_domain.at(i)).inverse());
-        let mut packed_denoms_inv = denoms_inv.map(PackedM31::broadcast);
-        bit_reverse(&mut packed_denoms_inv);
-        span.exit();
-
-        let _span = span!(Level::INFO, "Constraint pointwise eval").entered();
-
-        let constraint_log_degree_bound = self.max_constraint_log_degree_bound();
-        let n_constraints = self.n_constraints();
-        let [accum] =
-            evaluation_accumulator.columns([(constraint_log_degree_bound, n_constraints)]);
-        let mut pows = accum.random_coeff_powers.clone();
-        pows.reverse();
-
-        for vec_row in 0..(1 << (eval_domain.log_size() - LOG_N_LANES)) {
-            let mut evaluator = PoseidonEval {
-                eval: SimdDomainEvaluator::new(
-                    &trace_eval_ref,
-                    vec_row,
-                    &pows,
-                    self.log_n_rows,
-                    self.log_n_rows + LOG_EXPAND,
-                ),
-            };
-            for _ in 0..N_INSTANCES_PER_ROW {
-                evaluator.eval();
-            }
-
-            let packed_denom_inv =
-                packed_denoms_inv[vec_row >> (zero_domain.log_size() - LOG_N_LANES)];
-            let quotient = evaluator.eval.row_res * packed_denom_inv;
-            unsafe {
-                accum
-                    .col
-                    .set_packed(vec_row, accum.col.packed_at(vec_row) + quotient)
-            }
-            assert_eq!(evaluator.eval.constraint_index, n_constraints);
+    #[allow(clippy::needless_range_loop)]
+    for rep_i in 0..N_INSTANCES_PER_ROW {
+        let mut col_gen = logup_gen.new_col();
+        for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+            // Batch the 2 lookups together.
+            let denom0: PackedSecureField = lookup_elements.combine(
+                &lookup_data.initial_state[rep_i]
+                    .each_ref()
+                    .map(|s| s.data[vec_row]),
+            );
+            let denom1: PackedSecureField = lookup_elements.combine(
+                &lookup_data.final_state[rep_i]
+                    .each_ref()
+                    .map(|s| s.data[vec_row]),
+            );
+            // (1 / denom1) - (1 / denom1) = (denom1 - denom0) / (denom0 * denom1).
+            col_gen.write_frac(vec_row, denom1 - denom0, denom0 * denom1);
         }
+        col_gen.finalize_col();
     }
 
-    fn lookup_values(&self, _trace: &ComponentTrace<'_, SimdBackend>) -> LookupValues {
-        LookupValues::default()
-    }
+    logup_gen.finalize()
+}
+
+pub fn prove_poseidon(
+    log_n_instances: u32,
+) -> (PoseidonComponent, StarkProof<Blake2sMerkleHasher>) {
+    assert!(log_n_instances >= N_LOG_INSTANCES_PER_ROW as u32);
+    let log_n_rows = log_n_instances - N_LOG_INSTANCES_PER_ROW as u32;
+
+    // Precompute twiddles.
+    let span = span!(Level::INFO, "Precompute twiddles").entered();
+    let twiddles = SimdBackend::precompute_twiddles(
+        CanonicCoset::new(log_n_rows + LOG_EXPAND + LOG_BLOWUP_FACTOR)
+            .circle_domain()
+            .half_coset,
+    );
+    span.exit();
+
+    // Setup protocol.
+    let channel = &mut Blake2sChannel::default();
+    let commitment_scheme = &mut CommitmentSchemeProver::new(LOG_BLOWUP_FACTOR, &twiddles);
+
+    // Trace.
+    let span = span!(Level::INFO, "Trace").entered();
+    let (trace, lookup_data) = gen_trace(log_n_rows);
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(trace);
+    tree_builder.commit(channel);
+    span.exit();
+
+    // Draw lookup elements.
+    let lookup_elements = PoseidonElements::draw(channel);
+
+    // Interaction trace.
+    let span = span!(Level::INFO, "Interaction").entered();
+    let (trace, claimed_sum) = gen_interaction_trace(log_n_rows, lookup_data, &lookup_elements);
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(trace);
+    tree_builder.commit(channel);
+    span.exit();
+
+    // Prove constraints.
+    let component = PoseidonComponent {
+        log_n_rows,
+        lookup_elements,
+        claimed_sum,
+    };
+    let proof = prove::<SimdBackend, _>(
+        &[&component],
+        channel,
+        &InteractionElements::default(),
+        commitment_scheme,
+    )
+    .unwrap();
+
+    (component, proof)
 }
 
 #[cfg(test)]
@@ -441,25 +385,20 @@ mod tests {
 
     use itertools::Itertools;
     use num_traits::One;
-    use tracing::{span, Level};
 
-    use super::N_LOG_INSTANCES_PER_ROW;
     use crate::constraint_framework::assert_constraints;
-    use crate::constraint_framework::constant_columns::gen_is_first;
-    use crate::core::air::AirExt;
-    use crate::core::backend::simd::SimdBackend;
-    use crate::core::channel::{Blake2sChannel, Channel};
+    use crate::constraint_framework::logup::{LogupAtRow, LookupElements};
+    use crate::core::air::Component;
+    use crate::core::channel::Blake2sChannel;
     use crate::core::fields::m31::BaseField;
-    use crate::core::fields::IntoSlice;
-    use crate::core::pcs::{CommitmentSchemeProver, CommitmentSchemeVerifier, TreeVec};
-    use crate::core::poly::circle::{CanonicCoset, PolyOps};
-    use crate::core::prover::{prove, verify, LOG_BLOWUP_FACTOR};
-    use crate::core::vcs::blake2_hash::Blake2sHasher;
-    use crate::core::vcs::hasher::Hasher;
+    use crate::core::pcs::{CommitmentSchemeVerifier, TreeVec};
+    use crate::core::poly::circle::CanonicCoset;
+    use crate::core::prover::verify;
+    use crate::core::vcs::blake2_merkle::Blake2sMerkleChannel;
     use crate::core::InteractionElements;
     use crate::examples::poseidon::{
-        apply_internal_round_matrix, apply_m4, gen_trace, PoseidonAir, PoseidonComponent,
-        PoseidonEval, LOG_EXPAND,
+        apply_internal_round_matrix, apply_m4, gen_interaction_trace, gen_trace, prove_poseidon,
+        PoseidonElements, PoseidonEval,
     };
     use crate::math::matrix::{RowMajorMatrix, SquareMatrix};
 
@@ -503,16 +442,23 @@ mod tests {
     #[test]
     fn test_poseidon_constraints() {
         const LOG_N_ROWS: u32 = 8;
-        let component = PoseidonComponent {
-            log_n_rows: LOG_N_ROWS,
-        };
-        let trace = gen_trace(component.log_column_size());
-        let trace_polys = TreeVec::new(vec![trace
-            .into_iter()
-            .map(|c| c.interpolate())
-            .collect_vec()]);
+
+        // Trace.
+        let (trace0, interaction_data) = gen_trace(LOG_N_ROWS);
+        let lookup_elements = LookupElements::dummy();
+        let (trace1, claimed_sum) =
+            gen_interaction_trace(LOG_N_ROWS, interaction_data, &lookup_elements);
+
+        let traces = TreeVec::new(vec![trace0, trace1]);
+        let trace_polys =
+            traces.map(|trace| trace.into_iter().map(|c| c.interpolate()).collect_vec());
         assert_constraints(&trace_polys, CanonicCoset::new(LOG_N_ROWS), |eval| {
-            PoseidonEval { eval }.eval();
+            PoseidonEval {
+                eval,
+                logup: LogupAtRow::new(1, claimed_sum, LOG_N_ROWS),
+                lookup_elements: &lookup_elements,
+            }
+            .eval();
         });
     }
 
@@ -528,58 +474,29 @@ mod tests {
             .unwrap_or_else(|_| "10".to_string())
             .parse::<u32>()
             .unwrap();
-        let log_n_rows = log_n_instances - N_LOG_INSTANCES_PER_ROW as u32;
 
-        // Precompute twiddles.
-        let span = span!(Level::INFO, "Precompute twiddles").entered();
-        let twiddles = SimdBackend::precompute_twiddles(
-            CanonicCoset::new(log_n_rows + LOG_EXPAND + LOG_BLOWUP_FACTOR)
-                .circle_domain()
-                .half_coset,
-        );
-        span.exit();
-
-        // Setup protocol.
-        let channel = &mut Blake2sChannel::new(Blake2sHasher::hash(BaseField::into_slice(&[])));
-        let commitment_scheme = &mut CommitmentSchemeProver::new(LOG_BLOWUP_FACTOR);
-
-        // Trace.
-        let span = span!(Level::INFO, "Trace").entered();
-        let trace = gen_trace(log_n_rows);
-        commitment_scheme.commit_on_evals(trace, channel, &twiddles);
-        span.exit();
-
-        // Constant trace.
-        let span = span!(Level::INFO, "Constant").entered();
-        commitment_scheme.commit_on_evals(vec![gen_is_first(log_n_rows)], channel, &twiddles);
-        span.exit();
-
-        // Prove constraints.
-        let component = PoseidonComponent { log_n_rows };
-        let air = PoseidonAir { component };
-        let proof = prove::<SimdBackend>(
-            &air,
-            channel,
-            &InteractionElements::default(),
-            &twiddles,
-            commitment_scheme,
-        )
-        .unwrap();
+        // Prove.
+        let (component, proof) = prove_poseidon(log_n_instances);
 
         // Verify.
-        let channel = &mut Blake2sChannel::new(Blake2sHasher::hash(BaseField::into_slice(&[])));
-        let commitment_scheme = &mut CommitmentSchemeVerifier::new();
+        // TODO: Create Air instance independently.
+        let channel = &mut Blake2sChannel::default();
+        let commitment_scheme = &mut CommitmentSchemeVerifier::<Blake2sMerkleChannel>::new();
 
         // Decommit.
         // Retrieve the expected column sizes in each commitment interaction, from the AIR.
-        let sizes = air.column_log_sizes();
+        let sizes = component.trace_log_degree_bounds();
         // Trace columns.
         commitment_scheme.commit(proof.commitments[0], &sizes[0], channel);
-        // Constant columns.
-        commitment_scheme.commit(proof.commitments[1], &[log_n_rows], channel);
+        // Draw lookup element.
+        let lookup_elements = PoseidonElements::draw(channel);
+        assert_eq!(lookup_elements, component.lookup_elements);
+        // TODO(spapini): Check claimed sum against first and last instances.
+        // Interaction columns.
+        commitment_scheme.commit(proof.commitments[1], &sizes[1], channel);
 
         verify(
-            &air,
+            &[&component],
             channel,
             &InteractionElements::default(),
             commitment_scheme,

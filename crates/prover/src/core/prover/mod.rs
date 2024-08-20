@@ -3,32 +3,23 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{span, Level};
 
-use super::air::AirProver;
-use super::backend::Backend;
+use super::air::{Component, ComponentProver, ComponentProvers, Components};
+use super::backend::BackendForChannel;
+use super::channel::MerkleChannel;
 use super::fields::secure_column::SECURE_EXTENSION_DEGREE;
 use super::fri::FriVerificationError;
 use super::pcs::{CommitmentSchemeProof, TreeVec};
 use super::poly::circle::MAX_CIRCLE_DOMAIN_LOG_SIZE;
-use super::poly::twiddles::TwiddleTree;
-use super::proof_of_work::ProofOfWorkVerificationError;
+use super::vcs::ops::MerkleHasher;
 use super::{ColumnVec, InteractionElements, LookupValues};
-use crate::core::air::{Air, AirExt, AirProverExt};
 use crate::core::backend::CpuBackend;
-use crate::core::channel::{Blake2sChannel, Channel as ChannelTrait};
+use crate::core::channel::Channel;
 use crate::core::circle::CirclePoint;
 use crate::core::fields::qm31::SecureField;
 use crate::core::pcs::{CommitmentSchemeProver, CommitmentSchemeVerifier};
 use crate::core::poly::circle::CircleEvaluation;
 use crate::core::poly::BitReversedOrder;
-use crate::core::vcs::blake2_hash::Blake2sHasher;
-use crate::core::vcs::blake2_merkle::Blake2sMerkleHasher;
-use crate::core::vcs::hasher::Hasher;
-use crate::core::vcs::ops::MerkleOps;
 use crate::core::vcs::verifier::MerkleVerificationError;
-
-type Channel = Blake2sChannel;
-type ChannelHasher = Blake2sHasher;
-type MerkleHasher = Blake2sMerkleHasher;
 
 pub const LOG_BLOWUP_FACTOR: u32 = 1;
 pub const LOG_LAST_LAYER_DEGREE_BOUND: u32 = 0;
@@ -36,10 +27,10 @@ pub const PROOF_OF_WORK_BITS: u32 = 12;
 pub const N_QUERIES: usize = 3;
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct StarkProof {
-    pub commitments: TreeVec<<ChannelHasher as Hasher>::Hash>,
+pub struct StarkProof<H: MerkleHasher> {
+    pub commitments: TreeVec<H::Hash>,
     pub lookup_values: LookupValues,
-    pub commitment_scheme_proof: CommitmentSchemeProof,
+    pub commitment_scheme_proof: CommitmentSchemeProof<H>,
 }
 
 #[derive(Debug)]
@@ -50,22 +41,22 @@ pub struct AdditionalProofData {
     pub oods_quotients: Vec<CircleEvaluation<CpuBackend, SecureField, BitReversedOrder>>,
 }
 
-pub fn prove<B: Backend + MerkleOps<MerkleHasher>>(
-    air: &impl AirProver<B>,
-    channel: &mut Channel,
+pub fn prove<B: BackendForChannel<MC>, MC: MerkleChannel>(
+    components: &[&dyn ComponentProver<B>],
+    channel: &mut MC::C,
     interaction_elements: &InteractionElements,
-    twiddles: &TwiddleTree<B>,
-    commitment_scheme: &mut CommitmentSchemeProver<B>,
-) -> Result<StarkProof, ProvingError> {
-    let component_traces = air.component_traces(&commitment_scheme.trees);
-    let lookup_values = air.lookup_values(&component_traces);
+    commitment_scheme: &mut CommitmentSchemeProver<'_, B, MC>,
+) -> Result<StarkProof<MC::H>, ProvingError> {
+    let component_provers = ComponentProvers(components.to_vec());
+    let component_traces = component_provers.component_traces(&commitment_scheme.trees);
+    let lookup_values = component_provers.lookup_values(&component_traces);
 
     // Evaluate and commit on composition polynomial.
     let random_coeff = channel.draw_felt();
 
     let span = span!(Level::INFO, "Composition").entered();
     let span1 = span!(Level::INFO, "Generation").entered();
-    let composition_polynomial_poly = air.compute_composition_polynomial(
+    let composition_polynomial_poly = component_provers.compute_composition_polynomial(
         random_coeff,
         &component_traces,
         interaction_elements,
@@ -73,32 +64,41 @@ pub fn prove<B: Backend + MerkleOps<MerkleHasher>>(
     );
     span1.exit();
 
-    commitment_scheme.commit(composition_polynomial_poly.to_vec(), channel, twiddles);
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_polys(composition_polynomial_poly.to_vec());
+    tree_builder.commit(channel);
     span.exit();
 
     // Draw OODS point.
     let oods_point = CirclePoint::<SecureField>::get_random_point(channel);
 
     // Get mask sample points relative to oods point.
-    let sample_points = air.mask_points(oods_point);
+    let mut sample_points = component_provers.components().mask_points(oods_point);
+    // Add the composition polynomial mask points.
+    sample_points.push(vec![vec![oods_point]; SECURE_EXTENSION_DEGREE]);
 
     // Prove the trace and composition OODS values, and retrieve them.
-    let commitment_scheme_proof = commitment_scheme.prove_values(sample_points, channel, twiddles);
+    let commitment_scheme_proof = commitment_scheme.prove_values(sample_points, channel);
 
     // Evaluate composition polynomial at OODS point and check that it matches the trace OODS
     // values. This is a sanity check.
     // TODO(spapini): Save clone.
-    let (trace_oods_values, composition_oods_value) =
-        sampled_values_to_mask(air, &commitment_scheme_proof.sampled_values).unwrap();
+    let (trace_oods_values, composition_oods_value) = sampled_values_to_mask(
+        &component_provers.components(),
+        &commitment_scheme_proof.sampled_values,
+    )
+    .unwrap();
 
     if composition_oods_value
-        != air.eval_composition_polynomial_at_point(
-            oods_point,
-            &trace_oods_values,
-            random_coeff,
-            interaction_elements,
-            &lookup_values,
-        )
+        != component_provers
+            .components()
+            .eval_composition_polynomial_at_point(
+                oods_point,
+                &trace_oods_values,
+                random_coeff,
+                interaction_elements,
+                &lookup_values,
+            )
     {
         return Err(ProvingError::ConstraintsNotSatisfied);
     }
@@ -110,19 +110,20 @@ pub fn prove<B: Backend + MerkleOps<MerkleHasher>>(
     })
 }
 
-pub fn verify(
-    air: &impl Air,
-    channel: &mut Blake2sChannel,
+pub fn verify<MC: MerkleChannel>(
+    components: &[&dyn Component],
+    channel: &mut MC::C,
     interaction_elements: &InteractionElements,
-    commitment_scheme: &mut CommitmentSchemeVerifier,
-    proof: StarkProof,
+    commitment_scheme: &mut CommitmentSchemeVerifier<MC>,
+    proof: StarkProof<MC::H>,
 ) -> Result<(), VerificationError> {
+    let components = Components(components.to_vec());
     let random_coeff = channel.draw_felt();
 
     // Read composition polynomial commitment.
     commitment_scheme.commit(
         *proof.commitments.last().unwrap(),
-        &[air.composition_log_degree_bound(); SECURE_EXTENSION_DEGREE],
+        &[components.composition_log_degree_bound(); SECURE_EXTENSION_DEGREE],
         channel,
     );
 
@@ -130,19 +131,21 @@ pub fn verify(
     let oods_point = CirclePoint::<SecureField>::get_random_point(channel);
 
     // Get mask sample points relative to oods point.
-    let sample_points = air.mask_points(oods_point);
+    let mut sample_points = components.mask_points(oods_point);
+    // Add the composition polynomial mask points.
+    sample_points.push(vec![vec![oods_point]; SECURE_EXTENSION_DEGREE]);
 
     // TODO(spapini): Save clone.
-    let (trace_oods_values, composition_oods_value) = sampled_values_to_mask(
-        air,
-        &proof.commitment_scheme_proof.sampled_values,
-    )
-    .map_err(|_| {
-        VerificationError::InvalidStructure("Unexpected sampled_values structure".to_string())
-    })?;
+    let (trace_oods_values, composition_oods_value) =
+        sampled_values_to_mask(&components, &proof.commitment_scheme_proof.sampled_values)
+            .map_err(|_| {
+                VerificationError::InvalidStructure(
+                    "Unexpected sampled_values structure".to_string(),
+                )
+            })?;
 
     if composition_oods_value
-        != air.eval_composition_polynomial_at_point(
+        != components.eval_composition_polynomial_at_point(
             oods_point,
             &trace_oods_values,
             random_coeff,
@@ -153,7 +156,6 @@ pub fn verify(
         return Err(VerificationError::OodsNotMatching);
     }
 
-    air.verify_lookups(&proof.lookup_values)?;
     commitment_scheme.verify_values(sample_points, proof.commitment_scheme_proof, channel)
 }
 
@@ -161,15 +163,15 @@ pub fn verify(
 /// Structures the tree-wise sampled values into component-wise OODS values and a composition
 /// polynomial OODS value.
 fn sampled_values_to_mask(
-    air: &impl Air,
+    components: &Components<'_>,
     sampled_values: &TreeVec<ColumnVec<Vec<SecureField>>>,
 ) -> Result<(Vec<TreeVec<Vec<Vec<SecureField>>>>, SecureField), InvalidOodsSampleStructure> {
     let mut sampled_values = sampled_values.as_ref();
     let composition_values = sampled_values.pop().ok_or(InvalidOodsSampleStructure)?;
 
     let mut sample_iters = sampled_values.map(|tree_value| tree_value.iter());
-    let trace_oods_values = air
-        .components()
+    let trace_oods_values = components
+        .0
         .iter()
         .map(|component| {
             component
@@ -229,6 +231,6 @@ pub enum VerificationError {
     OodsNotMatching,
     #[error(transparent)]
     Fri(#[from] FriVerificationError),
-    #[error(transparent)]
-    ProofOfWork(#[from] ProofOfWorkVerificationError),
+    #[error("Proof of work verification failed.")]
+    ProofOfWork,
 }

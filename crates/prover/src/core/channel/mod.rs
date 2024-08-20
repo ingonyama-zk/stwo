@@ -1,16 +1,19 @@
 use super::fields::qm31::SecureField;
+use super::vcs::ops::MerkleHasher;
 
-mod blake2s;
 #[cfg(not(target_arch = "wasm32"))]
 mod poseidon252;
+#[cfg(not(target_arch = "wasm32"))]
+pub use poseidon252::Poseidon252Channel;
 
+mod blake2s;
 pub use blake2s::Blake2sChannel;
 
 pub const EXTENSION_FELTS_PER_HASH: usize = 2;
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct ChannelTime {
-    n_challenges: usize,
+    pub n_challenges: usize,
     n_sent: usize,
 }
 
@@ -25,16 +28,12 @@ impl ChannelTime {
     }
 }
 
-pub trait Channel {
-    type Digest;
-
+pub trait Channel: Default + Clone {
     const BYTES_PER_HASH: usize;
 
-    fn new(digest: Self::Digest) -> Self;
-    fn get_digest(&self) -> Self::Digest;
+    fn leading_zeros(&self) -> u32;
 
     // Mix functions.
-    fn mix_digest(&mut self, digest: Self::Digest);
     fn mix_felts(&mut self, felts: &[SecureField]);
     fn mix_nonce(&mut self, nonce: u64);
 
@@ -44,4 +43,10 @@ pub trait Channel {
     fn draw_felts(&mut self, n_felts: usize) -> Vec<SecureField>;
     /// Returns a vector of random bytes of length `BYTES_PER_HASH`.
     fn draw_random_bytes(&mut self) -> Vec<u8>;
+}
+
+pub trait MerkleChannel: Default {
+    type C: Channel;
+    type H: MerkleHasher;
+    fn mix_root(channel: &mut Self::C, root: <Self::H as MerkleHasher>::Hash);
 }

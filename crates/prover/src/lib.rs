@@ -1,5 +1,6 @@
 #![allow(warnings)]
 #![feature(
+    array_methods,
     array_chunks,
     iter_array_chunks,
     exact_size_is_empty,

@@ -16,17 +16,19 @@ mod tests {
     use crate::core::air::{Component, ComponentProver, ComponentTrace};
     use crate::core::backend::cpu::CpuCircleEvaluation;
     use crate::core::backend::CpuBackend;
-    use crate::core::channel::{Blake2sChannel, Channel};
+    use crate::core::channel::Blake2sChannel;
+    #[cfg(not(target_arch = "wasm32"))]
+    use crate::core::channel::Poseidon252Channel;
     use crate::core::fields::m31::BaseField;
     use crate::core::fields::qm31::SecureField;
-    use crate::core::fields::IntoSlice;
     use crate::core::pcs::TreeVec;
     use crate::core::poly::circle::CanonicCoset;
     use crate::core::utils::{
         bit_reverse, circle_domain_order_to_coset_order, shifted_secure_combination,
     };
-    use crate::core::vcs::blake2_hash::Blake2sHasher;
-    use crate::core::vcs::hasher::Hasher;
+    use crate::core::vcs::blake2_merkle::Blake2sMerkleChannel;
+    #[cfg(not(target_arch = "wasm32"))]
+    use crate::core::vcs::poseidon252_merkle::Poseidon252MerkleChannel;
     use crate::core::InteractionElements;
     use crate::examples::wide_fibonacci::trace_gen::write_lookup_column;
     use crate::trace_generation::{commit_and_prove, commit_and_verify, ComponentTraceGenerator};
@@ -232,12 +234,45 @@ mod tests {
             .map(|eval| CpuCircleEvaluation::new_canonical_ordered(trace_domain, eval))
             .collect_vec();
         let air = WideFibAir { component };
-        let prover_channel =
-            &mut Blake2sChannel::new(Blake2sHasher::hash(BaseField::into_slice(&[])));
-        let proof = commit_and_prove::<CpuBackend>(&air, prover_channel, trace).unwrap();
+        let prover_channel = &mut Blake2sChannel::default();
+        let proof =
+            commit_and_prove::<CpuBackend, Blake2sMerkleChannel>(&air, prover_channel, trace)
+                .unwrap();
 
-        let verifier_channel =
-            &mut Blake2sChannel::new(Blake2sHasher::hash(BaseField::into_slice(&[])));
-        commit_and_verify(proof, &air, verifier_channel).unwrap();
+        let verifier_channel = &mut Blake2sChannel::default();
+        commit_and_verify::<Blake2sMerkleChannel>(proof, &air, verifier_channel).unwrap();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test_log::test]
+    fn test_single_instance_wide_fib_prove_with_poseidon() {
+        use crate::core::backend::CpuBackend;
+
+        const LOG_N_INSTANCES: u32 = 0;
+        let component = WideFibComponent {
+            log_fibonacci_size: 3 + LOG_N_COLUMNS as u32,
+            log_n_instances: LOG_N_INSTANCES,
+        };
+        let private_input = (0..(1 << LOG_N_INSTANCES))
+            .map(|i| Input {
+                a: m31!(1),
+                b: m31!(i),
+            })
+            .collect();
+        let trace = gen_trace(&component, private_input);
+
+        let trace_domain = CanonicCoset::new(component.log_column_size());
+        let trace = trace
+            .into_iter()
+            .map(|eval| CpuCircleEvaluation::new_canonical_ordered(trace_domain, eval))
+            .collect_vec();
+        let air = WideFibAir { component };
+        let prover_channel = &mut Poseidon252Channel::default();
+        let proof =
+            commit_and_prove::<CpuBackend, Poseidon252MerkleChannel>(&air, prover_channel, trace)
+                .unwrap();
+
+        let verifier_channel = &mut Poseidon252Channel::default();
+        commit_and_verify::<Poseidon252MerkleChannel>(proof, &air, verifier_channel).unwrap();
     }
 }

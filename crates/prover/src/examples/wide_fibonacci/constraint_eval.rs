@@ -11,7 +11,7 @@ use super::trace_gen::write_trace_row;
 use crate::core::air::accumulation::{ColumnAccumulator, DomainEvaluationAccumulator};
 use crate::core::air::{AirProver, Component, ComponentProver, ComponentTrace};
 use crate::core::backend::CpuBackend;
-use crate::core::channel::{Blake2sChannel, Channel};
+use crate::core::channel::Channel;
 use crate::core::circle::Coset;
 use crate::core::constraints::{coset_vanishing, point_excluder};
 use crate::core::fields::m31::BaseField;
@@ -20,6 +20,7 @@ use crate::core::fields::FieldExpOps;
 use crate::core::pcs::TreeVec;
 use crate::core::poly::circle::{CanonicCoset, CircleDomain, CircleEvaluation};
 use crate::core::poly::BitReversedOrder;
+use crate::core::prover::VerificationError;
 use crate::core::utils::{
     bit_reverse, point_vanish_denominator_inverses, previous_bit_reversed_circle_domain_index,
     shifted_secure_combination,
@@ -33,10 +34,14 @@ use crate::trace_generation::{
 // TODO(AlonH): Rename file to `cpu.rs`.
 
 impl AirTraceVerifier for WideFibAir {
-    fn interaction_elements(&self, channel: &mut Blake2sChannel) -> InteractionElements {
+    fn interaction_elements(&self, channel: &mut impl Channel) -> InteractionElements {
         let ids = self.component.interaction_element_ids();
         let elements = channel.draw_felts(ids.len());
         InteractionElements::new(BTreeMap::from_iter(zip_eq(ids, elements)))
+    }
+
+    fn verify_lookups(&self, _lookup_values: &LookupValues) -> Result<(), VerificationError> {
+        Ok(())
     }
 }
 
@@ -60,7 +65,7 @@ impl AirTraceGenerator<CpuBackend> for WideFibAir {
 }
 
 impl AirProver<CpuBackend> for WideFibAir {
-    fn prover_components(&self) -> Vec<&dyn ComponentProver<CpuBackend>> {
+    fn component_provers(&self) -> Vec<&dyn ComponentProver<CpuBackend>> {
         vec![&self.component]
     }
 }

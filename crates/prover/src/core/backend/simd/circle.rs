@@ -8,7 +8,7 @@ use super::fft::{ifft, rfft, CACHED_FFT_LOG_SIZE};
 use super::m31::{PackedBaseField, LOG_N_LANES, N_LANES};
 use super::qm31::PackedSecureField;
 use super::SimdBackend;
-use crate::core::backend::simd::column::BaseFieldVec;
+use crate::core::backend::simd::column::BaseColumn;
 use crate::core::backend::{Col, CpuBackend};
 use crate::core::circle::{CirclePoint, Coset};
 use crate::core::fields::m31::BaseField;
@@ -235,7 +235,7 @@ impl PolyOps for SimdBackend {
         // Evaluate on a big domains by evaluating on several subdomains.
         let log_subdomains = log_size - fft_log_size;
 
-        // Alllocate the destination buffer without initializing.
+        // Allocate the destination buffer without initializing.
         let mut values = Vec::with_capacity(domain.size() >> LOG_N_LANES);
         #[allow(clippy::uninit_vec)]
         unsafe {
@@ -268,7 +268,7 @@ impl PolyOps for SimdBackend {
 
         CircleEvaluation::new(
             domain,
-            BaseFieldVec {
+            BaseColumn {
                 data: values,
                 length: domain.size(),
             },

@@ -100,4 +100,8 @@ name = "quotients"
 
 [[bench]]
 harness = false
+name = "pcs"
+
+[[bench]]
+harness = false
 name = "accumulate"

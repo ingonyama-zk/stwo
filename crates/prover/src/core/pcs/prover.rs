@@ -4,74 +4,58 @@ use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use tracing::{span, Level};
 
-use super::super::channel::Blake2sChannel;
 use super::super::circle::CirclePoint;
 use super::super::fields::m31::BaseField;
 use super::super::fields::qm31::SecureField;
 use super::super::fri::{FriConfig, FriProof, FriProver};
 use super::super::poly::circle::CanonicCoset;
 use super::super::poly::BitReversedOrder;
-use super::super::proof_of_work::{ProofOfWork, ProofOfWorkProof};
 use super::super::prover::{
     LOG_BLOWUP_FACTOR, LOG_LAST_LAYER_DEGREE_BOUND, N_QUERIES, PROOF_OF_WORK_BITS,
 };
 use super::super::ColumnVec;
 use super::quotients::{compute_fri_quotients, PointSample};
 use super::utils::TreeVec;
-use crate::core::backend::Backend;
-use crate::core::channel::Channel;
+use super::TreeColumnSpan;
+use crate::core::backend::BackendForChannel;
+use crate::core::channel::{Channel, MerkleChannel};
 use crate::core::poly::circle::{CircleEvaluation, CirclePoly};
 use crate::core::poly::twiddles::TwiddleTree;
-use crate::core::vcs::blake2_hash::Blake2sHash;
-use crate::core::vcs::blake2_merkle::Blake2sMerkleHasher;
-use crate::core::vcs::ops::MerkleOps;
+use crate::core::vcs::ops::MerkleHasher;
 use crate::core::vcs::prover::{MerkleDecommitment, MerkleProver};
 
-type MerkleHasher = Blake2sMerkleHasher;
-type ProofChannel = Blake2sChannel;
-
 /// The prover side of a FRI polynomial commitment scheme. See [super].
-pub struct CommitmentSchemeProver<B: Backend + MerkleOps<MerkleHasher>> {
-    pub trees: TreeVec<CommitmentTreeProver<B>>,
+pub struct CommitmentSchemeProver<'a, B: BackendForChannel<MC>, MC: MerkleChannel> {
+    pub trees: TreeVec<CommitmentTreeProver<B, MC>>,
     pub log_blowup_factor: u32,
+    twiddles: &'a TwiddleTree<B>,
 }
 
-impl<B: Backend + MerkleOps<MerkleHasher>> CommitmentSchemeProver<B> {
-    pub fn new(log_blowup_factor: u32) -> Self {
+impl<'a, B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentSchemeProver<'a, B, MC> {
+    pub fn new(log_blowup_factor: u32, twiddles: &'a TwiddleTree<B>) -> Self {
         CommitmentSchemeProver {
             trees: TreeVec::default(),
             log_blowup_factor,
+            twiddles,
         }
     }
 
-    pub fn commit(
-        &mut self,
-        polynomials: ColumnVec<CirclePoly<B>>,
-        channel: &mut ProofChannel,
-        twiddles: &TwiddleTree<B>,
-    ) {
+    fn commit(&mut self, polynomials: ColumnVec<CirclePoly<B>>, channel: &mut MC::C) {
         let _span = span!(Level::INFO, "Commitment").entered();
         let tree =
-            CommitmentTreeProver::new(polynomials, self.log_blowup_factor, channel, twiddles);
+            CommitmentTreeProver::new(polynomials, self.log_blowup_factor, channel, self.twiddles);
         self.trees.push(tree);
     }
 
-    pub fn commit_on_evals(
-        &mut self,
-        evals: ColumnVec<CircleEvaluation<B, BaseField, BitReversedOrder>>,
-        channel: &mut ProofChannel,
-        twiddles: &TwiddleTree<B>,
-    ) {
-        let span = span!(Level::INFO, "Interpolation for commitment").entered();
-        let polys = evals
-            .into_iter()
-            .map(|eval| eval.interpolate_with_twiddles(twiddles))
-            .collect();
-        span.exit();
-        self.commit(polys, channel, twiddles);
+    pub fn tree_builder(&mut self) -> TreeBuilder<'_, 'a, B, MC> {
+        TreeBuilder {
+            tree_index: self.trees.len(),
+            commitment_scheme: self,
+            polys: Vec::default(),
+        }
     }
 
-    pub fn roots(&self) -> TreeVec<Blake2sHash> {
+    pub fn roots(&self) -> TreeVec<<MC::H as MerkleHasher>::Hash> {
         self.trees.as_ref().map(|tree| tree.commitment.root())
     }
 
@@ -90,9 +74,8 @@ impl<B: Backend + MerkleOps<MerkleHasher>> CommitmentSchemeProver<B> {
     pub fn prove_values(
         &self,
         sampled_points: TreeVec<ColumnVec<Vec<CirclePoint<SecureField>>>>,
-        channel: &mut ProofChannel,
-        twiddles: &TwiddleTree<B>,
-    ) -> CommitmentSchemeProof {
+        channel: &mut MC::C,
+    ) -> CommitmentSchemeProof<MC::H> {
         // Evaluate polynomials on open points.
         let span = span!(Level::INFO, "Evaluate columns out of domain").entered();
         let samples = self
@@ -119,11 +102,11 @@ impl<B: Backend + MerkleOps<MerkleHasher>> CommitmentSchemeProver<B> {
 
         // Run FRI commitment phase on the oods quotients.
         let fri_config = FriConfig::new(LOG_LAST_LAYER_DEGREE_BOUND, LOG_BLOWUP_FACTOR, N_QUERIES);
-        let fri_prover =
-            FriProver::<B, MerkleHasher>::commit(channel, fri_config, &quotients, twiddles);
+        let fri_prover = FriProver::<B, MC>::commit(channel, fri_config, &quotients, self.twiddles);
 
         // Proof of work.
-        let proof_of_work = ProofOfWork::new(PROOF_OF_WORK_BITS).prove(channel);
+        let proof_of_work = B::grind(channel, PROOF_OF_WORK_BITS);
+        channel.mix_nonce(proof_of_work);
 
         // FRI decommitment phase.
         let (fri_proof, fri_query_domains) = fri_prover.decommit(channel);
@@ -151,27 +134,68 @@ impl<B: Backend + MerkleOps<MerkleHasher>> CommitmentSchemeProver<B> {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct CommitmentSchemeProof {
+pub struct CommitmentSchemeProof<H: MerkleHasher> {
     pub sampled_values: TreeVec<ColumnVec<Vec<SecureField>>>,
-    pub decommitments: TreeVec<MerkleDecommitment<MerkleHasher>>,
+    pub decommitments: TreeVec<MerkleDecommitment<H>>,
     pub queried_values: TreeVec<ColumnVec<Vec<BaseField>>>,
-    pub proof_of_work: ProofOfWorkProof,
-    pub fri_proof: FriProof<MerkleHasher>,
+    pub proof_of_work: u64,
+    pub fri_proof: FriProof<H>,
+}
+
+pub struct TreeBuilder<'a, 'b, B: BackendForChannel<MC>, MC: MerkleChannel> {
+    tree_index: usize,
+    commitment_scheme: &'a mut CommitmentSchemeProver<'b, B, MC>,
+    polys: ColumnVec<CirclePoly<B>>,
+}
+impl<'a, 'b, B: BackendForChannel<MC>, MC: MerkleChannel> TreeBuilder<'a, 'b, B, MC> {
+    pub fn extend_evals(
+        &mut self,
+        columns: ColumnVec<CircleEvaluation<B, BaseField, BitReversedOrder>>,
+    ) -> TreeColumnSpan {
+        let span = span!(Level::INFO, "Interpolation for commitment").entered();
+        let col_start = self.polys.len();
+        let polys = columns
+            .into_iter()
+            .map(|eval| eval.interpolate_with_twiddles(self.commitment_scheme.twiddles))
+            .collect_vec();
+        span.exit();
+        self.polys.extend(polys);
+        TreeColumnSpan {
+            tree_index: self.tree_index,
+            col_start,
+            col_end: self.polys.len(),
+        }
+    }
+
+    pub fn extend_polys(&mut self, polys: ColumnVec<CirclePoly<B>>) -> TreeColumnSpan {
+        let col_start = self.polys.len();
+        self.polys.extend(polys);
+        TreeColumnSpan {
+            tree_index: self.tree_index,
+            col_start,
+            col_end: self.polys.len(),
+        }
+    }
+
+    pub fn commit(self, channel: &mut MC::C) {
+        let _span = span!(Level::INFO, "Commitment").entered();
+        self.commitment_scheme.commit(self.polys, channel);
+    }
 }
 
 /// Prover data for a single commitment tree in a commitment scheme. The commitment scheme allows to
 /// commit on a set of polynomials at a time. This corresponds to such a set.
-pub struct CommitmentTreeProver<B: Backend + MerkleOps<MerkleHasher>> {
+pub struct CommitmentTreeProver<B: BackendForChannel<MC>, MC: MerkleChannel> {
     pub polynomials: ColumnVec<CirclePoly<B>>,
     pub evaluations: ColumnVec<CircleEvaluation<B, BaseField, BitReversedOrder>>,
-    pub commitment: MerkleProver<B, MerkleHasher>,
+    pub commitment: MerkleProver<B, MC::H>,
 }
 
-impl<B: Backend + MerkleOps<MerkleHasher>> CommitmentTreeProver<B> {
-    fn new(
+impl<B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentTreeProver<B, MC> {
+    pub fn new(
         polynomials: ColumnVec<CirclePoly<B>>,
         log_blowup_factor: u32,
-        channel: &mut ProofChannel,
+        channel: &mut MC::C,
         twiddles: &TwiddleTree<B>,
     ) -> Self {
         let span = span!(Level::INFO, "Extension").entered();
@@ -189,7 +213,7 @@ impl<B: Backend + MerkleOps<MerkleHasher>> CommitmentTreeProver<B> {
 
         let _span = span!(Level::INFO, "Merkle").entered();
         let tree = MerkleProver::commit(evaluations.iter().map(|eval| &eval.values).collect());
-        channel.mix_digest(tree.root());
+        MC::mix_root(channel, tree.root());
 
         CommitmentTreeProver {
             polynomials,
@@ -205,7 +229,7 @@ impl<B: Backend + MerkleOps<MerkleHasher>> CommitmentTreeProver<B> {
     fn decommit(
         &self,
         queries: BTreeMap<u32, Vec<usize>>,
-    ) -> (ColumnVec<Vec<BaseField>>, MerkleDecommitment<MerkleHasher>) {
+    ) -> (ColumnVec<Vec<BaseField>>, MerkleDecommitment<MC::H>) {
         let eval_vec = self
             .evaluations
             .iter()
