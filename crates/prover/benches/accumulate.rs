@@ -2,17 +2,15 @@
 
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use stwo_prover::core::air::accumulation::AccumulationOps;
-use stwo_prover::core::fields::m31::BaseField;
-use stwo_prover::core::fields::secure_column::SecureColumnByCoords;
 use stwo_prover::core::backend::cpu::CpuBackend;
 use stwo_prover::core::backend::simd::SimdBackend;
+use stwo_prover::core::fields::m31::BaseField;
+use stwo_prover::core::fields::secure_column::SecureColumnByCoords;
 
 const LOG_SIZE: usize = 28;
 const SIZE: usize = 1 << LOG_SIZE;
 
 pub fn cpu_accumulate(c: &mut Criterion) {
-
-
     let data = SecureColumnByCoords::<CpuBackend> {
         columns: std::array::from_fn(|i| vec![BaseField::from_u32_unchecked(i as u32); SIZE]),
     };
@@ -28,7 +26,6 @@ pub fn cpu_accumulate(c: &mut Criterion) {
 }
 
 pub fn simd_accumulate(c: &mut Criterion) {
-
     let cpu_col = SecureColumnByCoords::<CpuBackend> {
         columns: std::array::from_fn(|i| vec![BaseField::from_u32_unchecked(i as u32); SIZE]),
     };

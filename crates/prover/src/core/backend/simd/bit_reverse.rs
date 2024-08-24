@@ -140,37 +140,22 @@ fn bit_reverse16(mut data: [PackedBaseField; 16]) -> [PackedBaseField; 16] {
 }
 
 pub fn icicle_bit_reverse_inplace_field(column: &mut [BaseField]) {
-    use std::mem::transmute;
+    use std::slice::from_raw_parts_mut;
 
-    use icicle_core::vec_ops::{
-        bit_reverse, bit_reverse_inplace, BitReverseConfig, VecOps, VecOpsConfig,
-    };
-    use icicle_cuda_runtime::memory::{DeviceVec, HostSlice};
+    use icicle_core::vec_ops::{bit_reverse_inplace, BitReverseConfig};
+    use icicle_cuda_runtime::memory::HostSlice;
     use icicle_m31::field::ScalarField;
 
-    //let mut input_vec: Vec<ScalarField>;
     let len = column.len();
-    // for i in 0..len {
-    //     // TODO: just for the sake of correctness check - perf optimisation can be done without
-    //     // data conversion
-    //     input_vec.push(unsafe { transmute(column[i]) });
-    // }
 
     // let mut input_vec: &mut [ScalarField] = unsafe { transmute(column) };
 
     let input_ptr = column.as_mut_ptr() as *mut ScalarField;
-    let input_vec: &mut [ScalarField] = unsafe { std::slice::from_raw_parts_mut(input_ptr, len) };
+    let input_vec: &mut [ScalarField] = unsafe { from_raw_parts_mut(input_ptr, len) };
 
     let input = HostSlice::from_mut_slice(input_vec);
     let cfg = BitReverseConfig::default();
     bit_reverse_inplace(input, &cfg).unwrap();
-
-    // let mut a: Vec<BaseField> = vec![];
-    // for i in 0..len {
-    //     a.push(unsafe { transmute(input_vec[i]) });
-    // }
-
-    // a
 }
 
 #[cfg(test)]
@@ -178,14 +163,13 @@ mod tests {
     use itertools::Itertools;
 
     use super::{bit_reverse16, bit_reverse_m31, MIN_LOG_SIZE};
+    use crate::core::backend::simd::bit_reverse::icicle_bit_reverse_inplace_field;
     use crate::core::backend::simd::column::BaseColumn;
     use crate::core::backend::simd::m31::{PackedM31, N_LANES};
     use crate::core::backend::simd::SimdBackend;
     use crate::core::backend::{Column, ColumnOps};
     use crate::core::fields::m31::BaseField;
     use crate::core::utils::bit_reverse as cpu_bit_reverse;
-
-    use crate::core::backend::simd::bit_reverse::icicle_bit_reverse_inplace_field;
 
     #[test]
     fn test_bit_reverse16() {
