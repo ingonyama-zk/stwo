@@ -139,6 +139,7 @@ fn bit_reverse16(mut data: [PackedBaseField; 16]) -> [PackedBaseField; 16] {
     data
 }
 
+#[cfg(feature = "icicle_poc")]
 pub fn icicle_bit_reverse_inplace_field(column: &mut [BaseField]) {
     use std::slice::from_raw_parts_mut;
 
@@ -163,7 +164,6 @@ mod tests {
     use itertools::Itertools;
 
     use super::{bit_reverse16, bit_reverse_m31, MIN_LOG_SIZE};
-    use crate::core::backend::simd::bit_reverse::icicle_bit_reverse_inplace_field;
     use crate::core::backend::simd::column::BaseColumn;
     use crate::core::backend::simd::m31::{PackedM31, N_LANES};
     use crate::core::backend::simd::SimdBackend;
@@ -217,11 +217,15 @@ mod tests {
         let mut expected = column.clone();
         cpu_bit_reverse(&mut expected);
 
+        #[cfg(feature = "icicle_poc")]
+        use crate::core::backend::simd::bit_reverse::icicle_bit_reverse_inplace_field;
+        #[cfg(feature = "icicle_poc")]
         icicle_bit_reverse_inplace_field(&mut column);
 
         <SimdBackend as ColumnOps<BaseField>>::bit_reverse_column(&mut res);
 
         assert_eq!(res.to_cpu(), expected);
+        #[cfg(feature = "icicle_poc")]
         assert_eq!(column, expected);
     }
 }
