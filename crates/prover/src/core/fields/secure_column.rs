@@ -9,6 +9,7 @@ pub const SECURE_EXTENSION_DEGREE: usize =
 /// A column major array of `SECURE_EXTENSION_DEGREE` base field columns, that represents a column
 /// of secure field element coordinates.
 #[derive(Clone, Debug)]
+#[repr(C, align(8))]
 pub struct SecureColumnByCoords<B: FieldOps<BaseField>> {
     pub columns: [Col<B, BaseField>; SECURE_EXTENSION_DEGREE],
 }

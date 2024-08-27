@@ -15,10 +15,16 @@ impl AccumulationOps for CpuBackend {
             // icicle for now suboptimal due to conversion
             use std::mem::transmute;
 
-            use icicle_core::vec_ops::{accumulate_scalars, VecOpsConfig};
-            use icicle_cuda_runtime::memory::HostSlice;
-            use icicle_m31::field::ExtensionField;
+            use icicle_core::ntt::FieldImpl;
+            use icicle_core::vec_ops::{
+                accumulate_scalars, stwo_convert, transpose_matrix, VecOpsConfig,
+            };
+            use icicle_cuda_runtime::memory::{
+                DeviceSlice, DeviceVec, HostOrDeviceSlice, HostSlice,
+            };
+            use icicle_m31::field::{ExtensionField, ScalarField};
 
+            // use std::ptr::from_raw_parts;
             use crate::core::SecureField;
 
             let mut a: Vec<ExtensionField> = vec![];
@@ -40,19 +46,62 @@ impl AccumulationOps for CpuBackend {
                 b.push(bb);
             }
 
-            let a = HostSlice::from_mut_slice(&mut a);
-            let b = HostSlice::from_slice(&b);
+            let aa = HostSlice::from_mut_slice(&mut a);
+            let bb = HostSlice::from_slice(&b);
 
             let cfg = VecOpsConfig::default();
 
-            accumulate_scalars(a, b, &cfg).unwrap();
+            let a: &[u32] = unsafe { transmute(column.columns[0].as_slice()) };
+            let b: &[u32] = unsafe { transmute(column.columns[1].as_slice()) };
+            let c: &[u32] = unsafe { transmute(column.columns[2].as_slice()) };
+            let d: &[u32] = unsafe { transmute(column.columns[3].as_slice()) };
 
-            a.iter().enumerate().for_each(|(i, &item)| {
-                column.set(
-                    i,
-                    SecureField::from_m31_array(unsafe { std::mem::transmute(item) }),
-                )
-            });
+            let n = column.columns[0].len();
+
+            let mut result: DeviceVec<ExtensionField> = DeviceVec::cuda_malloc(n).unwrap();
+
+            let a = HostSlice::from_slice(&a);
+            let b = HostSlice::from_slice(&b);
+            let c = HostSlice::from_slice(&c);
+            let d = HostSlice::from_slice(&d);
+
+            stwo_convert(a, b, c, d, &mut result[..]);
+
+            accumulate_scalars(&mut result[..], bb, &cfg).unwrap();
+
+            let red_u32_d: DeviceVec<ScalarField> = unsafe { transmute(result) };
+
+            let mut result_tr: DeviceVec<ScalarField> = DeviceVec::cuda_malloc(4 * n).unwrap();
+
+            let mut intermediate_host = vec![ScalarField::one(); 4 * n];
+
+            let on_device = true;
+            let is_async = false;
+            // for now, columns batching only works with MixedRadix NTT
+            use icicle_cuda_runtime::device_context::DeviceContext;
+            transpose_matrix(
+                &red_u32_d[..],
+                4,
+                n as u32,
+                &mut result_tr[..],
+                &DeviceContext::default(),
+                on_device,
+                is_async,
+            )
+            .unwrap();
+            let res_host = HostSlice::from_mut_slice(&mut intermediate_host[..]);
+            result_tr.copy_to_host(res_host).unwrap();
+
+            use crate::core::fields::m31::M31;
+
+            let res: Vec<M31> = unsafe { transmute(intermediate_host) };
+
+            // Assign the sub-slices to the column
+            column.columns[0] = res[..n].to_vec();
+            column.columns[1] = res[n..2 * n].to_vec();
+            column.columns[2] = res[2 * n..3 * n].to_vec();
+            column.columns[3] = res[3 * n..].to_vec();
         }
+        // panic!("Acc cpu");
     }
 }
