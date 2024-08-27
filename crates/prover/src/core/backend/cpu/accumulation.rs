@@ -23,32 +23,12 @@ impl AccumulationOps for CpuBackend {
                 DeviceSlice, DeviceVec, HostOrDeviceSlice, HostSlice,
             };
             use icicle_m31::field::{ExtensionField, ScalarField};
+            use icicle_cuda_runtime::device_context::DeviceContext;
+
 
             // use std::ptr::from_raw_parts;
             use crate::core::SecureField;
-
-            let mut a: Vec<ExtensionField> = vec![];
-            let mut b: Vec<ExtensionField> = vec![];
-            let len = column.len();
-            for i in 0..len {
-                // TODO: just for the sake of correctness check - perf optimisation can be done
-                // without data conversion
-                let ci = column.at(i);
-                let oi = other.at(i);
-
-                let aa = ci.to_m31_array();
-                let bb = oi.to_m31_array();
-
-                let aa: ExtensionField = unsafe { transmute(aa) };
-                let bb: ExtensionField = unsafe { transmute(bb) };
-
-                a.push(aa);
-                b.push(bb);
-            }
-
-            let aa = HostSlice::from_mut_slice(&mut a);
-            let bb = HostSlice::from_slice(&b);
-
+            let n = column.columns[0].len();
             let cfg = VecOpsConfig::default();
 
             let a: &[u32] = unsafe { transmute(column.columns[0].as_slice()) };
@@ -56,20 +36,31 @@ impl AccumulationOps for CpuBackend {
             let c: &[u32] = unsafe { transmute(column.columns[2].as_slice()) };
             let d: &[u32] = unsafe { transmute(column.columns[3].as_slice()) };
 
-            let n = column.columns[0].len();
+            let a = HostSlice::from_slice(&a);
+            let b = HostSlice::from_slice(&b);
+            let c = HostSlice::from_slice(&c);
+            let d = HostSlice::from_slice(&d);
 
-            let mut result: DeviceVec<ExtensionField> = DeviceVec::cuda_malloc(n).unwrap();
+            let mut col_a: DeviceVec<ExtensionField> = DeviceVec::cuda_malloc(n).unwrap();
+
+            stwo_convert(a, b, c, d, &mut col_a[..]);
+
+            let a: &[u32] = unsafe { transmute(other.columns[0].as_slice()) };
+            let b: &[u32] = unsafe { transmute(other.columns[1].as_slice()) };
+            let c: &[u32] = unsafe { transmute(other.columns[2].as_slice()) };
+            let d: &[u32] = unsafe { transmute(other.columns[3].as_slice()) };
 
             let a = HostSlice::from_slice(&a);
             let b = HostSlice::from_slice(&b);
             let c = HostSlice::from_slice(&c);
             let d = HostSlice::from_slice(&d);
 
-            stwo_convert(a, b, c, d, &mut result[..]);
+            let mut col_b: DeviceVec<ExtensionField> = DeviceVec::cuda_malloc(n).unwrap();
 
-            accumulate_scalars(&mut result[..], bb, &cfg).unwrap();
+            stwo_convert(a, b, c, d, &mut col_b[..]);
+            accumulate_scalars(&mut col_a[..], &col_b[..], &cfg).unwrap();
 
-            let red_u32_d: DeviceVec<ScalarField> = unsafe { transmute(result) };
+            let red_u32_d: DeviceVec<ScalarField> = unsafe { transmute(col_a) };
 
             let mut result_tr: DeviceVec<ScalarField> = DeviceVec::cuda_malloc(4 * n).unwrap();
 
@@ -77,8 +68,6 @@ impl AccumulationOps for CpuBackend {
 
             let on_device = true;
             let is_async = false;
-            // for now, columns batching only works with MixedRadix NTT
-            use icicle_cuda_runtime::device_context::DeviceContext;
             transpose_matrix(
                 &red_u32_d[..],
                 4,
@@ -97,10 +86,14 @@ impl AccumulationOps for CpuBackend {
             let res: Vec<M31> = unsafe { transmute(intermediate_host) };
 
             // Assign the sub-slices to the column
-            column.columns[0] = res[..n].to_vec();
-            column.columns[1] = res[n..2 * n].to_vec();
-            column.columns[2] = res[2 * n..3 * n].to_vec();
-            column.columns[3] = res[3 * n..].to_vec();
+            column.columns[0].truncate(0);
+            column.columns[0].extend_from_slice(&res[..n]);
+            column.columns[1].truncate(0);
+            column.columns[1].extend_from_slice(&res[n..2 * n]);
+            column.columns[2].truncate(0);
+            column.columns[2].extend_from_slice(&res[2 * n..3 * n]);
+            column.columns[3].truncate(0);
+            column.columns[3].extend_from_slice(&res[3 * n..]);
         }
         // panic!("Acc cpu");
     }
