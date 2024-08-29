@@ -19,16 +19,20 @@ impl AccumulationOps for CpuBackend {
             use icicle_core::vec_ops::{
                 accumulate_scalars, stwo_convert, transpose_matrix, VecOpsConfig,
             };
+            use icicle_cuda_runtime::device_context::DeviceContext;
             use icicle_cuda_runtime::memory::{
                 DeviceSlice, DeviceVec, HostOrDeviceSlice, HostSlice,
             };
+            use icicle_cuda_runtime::stream::CudaStream;
             use icicle_m31::field::{ExtensionField, ScalarField};
-            use icicle_cuda_runtime::device_context::DeviceContext;
 
+            let zero = ScalarField::zero();
+
+            let n = column.columns[0].len();
+            let mut intermediate_host = vec![zero; 4 * n];
 
             // use std::ptr::from_raw_parts;
             use crate::core::SecureField;
-            let n = column.columns[0].len();
             let cfg = VecOpsConfig::default();
 
             let a: &[u32] = unsafe { transmute(column.columns[0].as_slice()) };
@@ -41,10 +45,17 @@ impl AccumulationOps for CpuBackend {
             let c = HostSlice::from_slice(&c);
             let d = HostSlice::from_slice(&d);
 
-            let mut col_a: DeviceVec<ExtensionField> = DeviceVec::cuda_malloc(n).unwrap();
+            let stream1 = CudaStream::create().expect("Failed to create CUDA stream");
+            let stream2 = CudaStream::create().expect("Failed to create CUDA stream");
+            let stream3 = CudaStream::create().expect("Failed to create CUDA stream");
+            let mut col_a: DeviceVec<ExtensionField> =
+                DeviceVec::cuda_malloc_async(n, &stream1).unwrap();
 
+            stream1.synchronize().unwrap();
+            stream1.destroy().unwrap();
             stwo_convert(a, b, c, d, &mut col_a[..]);
-
+            let mut col_b: DeviceVec<ExtensionField> =
+                DeviceVec::cuda_malloc_async(n, &stream2).unwrap();
             let a: &[u32] = unsafe { transmute(other.columns[0].as_slice()) };
             let b: &[u32] = unsafe { transmute(other.columns[1].as_slice()) };
             let c: &[u32] = unsafe { transmute(other.columns[2].as_slice()) };
@@ -55,19 +66,19 @@ impl AccumulationOps for CpuBackend {
             let c = HostSlice::from_slice(&c);
             let d = HostSlice::from_slice(&d);
 
-            let mut col_b: DeviceVec<ExtensionField> = DeviceVec::cuda_malloc(n).unwrap();
-
+            stream2.synchronize().unwrap();
+            stream2.destroy().unwrap();
             stwo_convert(a, b, c, d, &mut col_b[..]);
             accumulate_scalars(&mut col_a[..], &col_b[..], &cfg).unwrap();
 
             let red_u32_d: DeviceVec<ScalarField> = unsafe { transmute(col_a) };
 
-            let mut result_tr: DeviceVec<ScalarField> = DeviceVec::cuda_malloc(4 * n).unwrap();
-
-            let mut intermediate_host = vec![ScalarField::one(); 4 * n];
-
             let on_device = true;
             let is_async = false;
+            let mut result_tr: DeviceVec<ScalarField> =
+                DeviceVec::cuda_malloc_async(4 * n, &stream3).unwrap();
+            stream3.synchronize().unwrap();
+            stream3.destroy().unwrap();
             transpose_matrix(
                 &red_u32_d[..],
                 4,
