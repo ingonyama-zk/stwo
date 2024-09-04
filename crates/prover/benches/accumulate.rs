@@ -11,7 +11,7 @@ const LOG_SIZE: usize = 26;
 const SIZE: usize = 1 << LOG_SIZE;
 
 pub fn cpu_accumulate(c: &mut Criterion) {
-    let data = SecureColumnByCoords::<CpuBackend> {
+    let mut data = SecureColumnByCoords::<CpuBackend> {
         columns: std::array::from_fn(|i| vec![BaseField::from_u32_unchecked(i as u32); SIZE]),
         is_transposed: false,
         device_data: std::ptr::null_mut(),
@@ -19,10 +19,8 @@ pub fn cpu_accumulate(c: &mut Criterion) {
     let mut data2 = data.clone();
     let bench_id = format!("cpu accumulate SecureColumn 2^{LOG_SIZE}");
     c.bench_function(&bench_id, |b| {
-        b.iter_batched(
-            || data.clone(),
-            |mut data| CpuBackend::accumulate(&mut data, &mut data2),
-            BatchSize::LargeInput,
+        b.iter(
+            || CpuBackend::accumulate(&mut data, &mut data2)
         );
     });
 }
@@ -41,12 +39,12 @@ pub fn simd_accumulate(c: &mut Criterion) {
         device_data: std::ptr::null_mut(),
     };
 
-    let data2 = data.clone();
+    let mut data2 = data.clone();
     let bench_id = format!("simd accumulate SecureColumn 2^{LOG_SIZE}");
     c.bench_function(&bench_id, |b| {
         b.iter_batched(
             || data.clone(),
-            |mut data| SimdBackend::accumulate(&mut data, &data2),
+            |mut data| SimdBackend::accumulate(&mut data, &mut data2),
             BatchSize::LargeInput,
         );
     });

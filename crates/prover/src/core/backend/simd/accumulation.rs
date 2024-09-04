@@ -4,7 +4,7 @@ use crate::core::fields::secure_column::SecureColumnByCoords;
 
 impl AccumulationOps for SimdBackend {
     fn confirm(column: &mut SecureColumnByCoords<Self>) {
-        //column.convert_from_icicle();
+        // TODO:
     }
 
     fn accumulate(column: &mut SecureColumnByCoords<Self>, other: &mut SecureColumnByCoords<Self>) {
