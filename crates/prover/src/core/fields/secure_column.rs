@@ -160,30 +160,17 @@ mod icicle_poc {
     impl SecureColumnByCoords<CpuBackend> {
         // TODO: implement geneics
         pub fn as_icicle_slice_mut(&self) -> &mut DeviceSlice<ScalarField> {
-            unsafe {
-                println!(
-                    "as_icicle_slice_mut: {:?} {:?} {:?}",
-                    self.columns[0][1],
-                    self.device_data,
-                    self.len()
-                );
-                DeviceSlice::from_mut_slice(&mut *slice_from_raw_parts_mut(
-                    self.device_data as *mut ScalarField,
-                    self.columns.len() * self.len(),
-                ))
-            }
+            self.as_icicle_device_slice_mut::<ScalarField>()
         }
 
         pub fn as_icicle_ext_slice_mut(&self) -> &mut DeviceSlice<ExtensionField> {
+            self.as_icicle_device_slice_mut::<ExtensionField>()
+        }
+
+        pub fn as_icicle_device_slice_mut<T>(&self) -> &mut DeviceSlice<T> {
             unsafe {
-                println!(
-                    "as_icicle_ext_slice_mut: {:?} {:?} {:?}",
-                    self.columns[0][1],
-                    self.device_data,
-                    self.len()
-                );
                 DeviceSlice::from_mut_slice(&mut *slice_from_raw_parts_mut(
-                    self.device_data as *mut ExtensionField,
+                    self.device_data as *mut T,
                     self.len(),
                 ))
             }
@@ -212,13 +199,10 @@ mod icicle_poc {
 
                 let mut col_a =
                     ManuallyDrop::new(DeviceVec::<ExtensionField>::cuda_malloc(n).unwrap());
-                // let mut col_a = DeviceVec::<ScalarField>::cuda_malloc(n).unwrap();
 
                 stwo_convert(a, b, c, d, &mut col_a[..]);
 
                 self.device_data = unsafe { col_a.as_mut_ptr() } as _;
-                println!("device_data: {:?}", self.device_data);
-                //std::mem::forget(col_a);
                 self.is_transposed = true;
             }
         }
@@ -226,19 +210,17 @@ mod icicle_poc {
         pub fn convert_from_icicle(&mut self) {
             if self.is_transposed {
                 assert!(!self.device_data.is_null());
-                println!("hererer");
                 let zero = ScalarField::zero();
 
                 let n = self.columns[0].len();
-                let mut intermediate_host = vec![zero; 4 * n];
+                let mut intermediate_host = vec![zero; self.columns.len() * n];
 
                 use crate::core::SecureField;
                 let cfg = VecOpsConfig::default();
 
                 let mut red_u32_d = self.as_icicle_slice_mut();
-                // let mut result_tr = red_u32_d;
 
-                let mut result_tr: DeviceVec<ScalarField> = DeviceVec::cuda_malloc(4 * n).unwrap();
+                let mut result_tr: DeviceVec<ScalarField> = DeviceVec::cuda_malloc(self.columns.len() * n).unwrap();
 
                 transpose_matrix(
                     red_u32_d,
@@ -303,21 +285,4 @@ mod icicle_poc {
             self.len() == 0
         }
     }
-
-    // // Implement the Drop trait to automatically free resources when an instance is dropped.
-    // impl<B: FieldOps<BaseField>> Drop for SecureColumnByCoords<B> {
-    //     fn drop(&mut self) {
-    //         // Free the device data when the SecureColumnByCoords instance goes out of scope.
-    //         if !self.device_data.is_null() {
-    //             unsafe {
-    //                 DeviceSlice::from_mut_slice(&mut *slice_from_raw_parts_mut(
-    //                     self.device_data,
-    //                     4 * self.len(),
-    //                 ))
-    //                 .cuda_free()
-    //                 .unwrap()
-    //             }
-    //         }
-    //     }
-    // }
 }
