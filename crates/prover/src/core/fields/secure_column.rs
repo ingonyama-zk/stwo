@@ -161,6 +161,12 @@ mod icicle_poc {
         // TODO: implement geneics
         pub fn as_icicle_slice_mut(&self) -> &mut DeviceSlice<ScalarField> {
             unsafe {
+                println!(
+                    "as_icicle_slice_mut: {:?} {:?} {:?}",
+                    self.columns[0][1],
+                    self.device_data,
+                    self.len()
+                );
                 DeviceSlice::from_mut_slice(&mut *slice_from_raw_parts_mut(
                     self.device_data as *mut ScalarField,
                     self.columns.len() * self.len(),
@@ -170,11 +176,16 @@ mod icicle_poc {
 
         pub fn as_icicle_ext_slice_mut(&self) -> &mut DeviceSlice<ExtensionField> {
             unsafe {
-                println!("as_icicle_ext_slice_mut: {:?} {:?} {:?}", self.columns[0][1], self.device_data, self.len());
-                transmute(DeviceSlice::from_mut_slice(&mut *slice_from_raw_parts_mut(
+                println!(
+                    "as_icicle_ext_slice_mut: {:?} {:?} {:?}",
+                    self.columns[0][1],
                     self.device_data,
+                    self.len()
+                );
+                DeviceSlice::from_mut_slice(&mut *slice_from_raw_parts_mut(
+                    self.device_data as *mut ExtensionField,
                     self.len(),
-                )))
+                ))
             }
         }
 
@@ -199,14 +210,15 @@ mod icicle_poc {
                 let c = HostSlice::from_slice(&c);
                 let d = HostSlice::from_slice(&d);
 
-                // let mut col_a = ManuallyDrop::new(DeviceVec::cuda_malloc(n).unwrap());
-                let mut col_a = DeviceVec::<ScalarField>::cuda_malloc(n).unwrap();
+                let mut col_a =
+                    ManuallyDrop::new(DeviceVec::<ExtensionField>::cuda_malloc(n).unwrap());
+                // let mut col_a = DeviceVec::<ScalarField>::cuda_malloc(n).unwrap();
 
                 stwo_convert(a, b, c, d, &mut col_a[..]);
 
                 self.device_data = unsafe { col_a.as_mut_ptr() } as _;
                 println!("device_data: {:?}", self.device_data);
-                std::mem::forget(col_a);
+                //std::mem::forget(col_a);
                 self.is_transposed = true;
             }
         }
@@ -224,8 +236,8 @@ mod icicle_poc {
                 let cfg = VecOpsConfig::default();
 
                 let mut red_u32_d = self.as_icicle_slice_mut();
-                //let mut result_tr = red_u32_d; 
-                
+                // let mut result_tr = red_u32_d;
+
                 let mut result_tr: DeviceVec<ScalarField> = DeviceVec::cuda_malloc(4 * n).unwrap();
 
                 transpose_matrix(

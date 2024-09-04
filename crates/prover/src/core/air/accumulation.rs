@@ -142,7 +142,7 @@ impl<B: Backend> DomainEvaluationAccumulator<B> {
                     device_data: std::ptr::null_mut(),
                 };
                 B::accumulate(&mut values, &mut eval);
-                //B::confirm(&mut values);
+                // B::confirm(&mut values);
             }
             cur_poly = Some(SecureCirclePoly(values.columns.map(|c| {
                 CircleEvaluation::<B, BaseField, BitReversedOrder>::new(
@@ -233,6 +233,8 @@ mod tests {
         CpuBackend::accumulate(&mut data, &mut data2);
         println!("cpu accumulate data2: {:?}", data2);
         println!("cpu accumulated data: {:?}", data);
+        let degree = data.columns.len() - 1;
+        assert_eq!(data.columns[degree][SIZE - 1].0, degree as u32 * 2);
     }
 
     #[test]
