@@ -213,18 +213,19 @@ mod icicle_poc {
                 let zero = ScalarField::zero();
 
                 let n = self.columns[0].len();
-                let mut intermediate_host = vec![zero; self.columns.len() * n];
+                let secure_degree = self .columns.len();
+                let mut intermediate_host = vec![zero; secure_degree * n];
 
                 use crate::core::SecureField;
                 let cfg = VecOpsConfig::default();
 
                 let mut red_u32_d = self.as_icicle_slice_mut();
 
-                let mut result_tr: DeviceVec<ScalarField> = DeviceVec::cuda_malloc(self.columns.len() * n).unwrap();
+                let mut result_tr: DeviceVec<ScalarField> = DeviceVec::cuda_malloc(secure_degree * n).unwrap();
 
                 transpose_matrix(
                     red_u32_d,
-                    4,
+                    secure_degree as u32,
                     n as u32,
                     &mut result_tr[..],
                     &DeviceContext::default(),
@@ -240,14 +241,13 @@ mod icicle_poc {
                 let res: Vec<M31> = unsafe { transmute(intermediate_host) };
 
                 // Assign the sub-slices to the column
-                self.columns[0].truncate(0);
-                self.columns[0].extend_from_slice(&res[..n]);
-                self.columns[1].truncate(0);
-                self.columns[1].extend_from_slice(&res[n..2 * n]);
-                self.columns[2].truncate(0);
-                self.columns[2].extend_from_slice(&res[2 * n..3 * n]);
-                self.columns[3].truncate(0);
-                self.columns[3].extend_from_slice(&res[3 * n..]);
+                for i in 0..secure_degree {
+                    let start = i * n;
+                    let end = start + n;
+                    
+                    self.columns[i].truncate(0);
+                    self.columns[i].extend_from_slice(&res[start..end]);
+                }
                 self.is_transposed = false;
 
                 unsafe { self.as_icicle_slice_mut().cuda_free().unwrap() }
