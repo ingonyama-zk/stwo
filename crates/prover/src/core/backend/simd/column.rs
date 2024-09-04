@@ -28,7 +28,7 @@ impl FieldOps<SecureField> for SimdBackend {
 }
 
 /// An efficient structure for storing and operating on a arbitrary number of [`BaseField`] values.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct BaseColumn {
     pub data: Vec<PackedBaseField>,
     /// The number of [`BaseField`]s in the vector.
@@ -117,7 +117,7 @@ impl FromIterator<BaseField> for BaseColumn {
 }
 
 // A efficient structure for storing and operating on a arbitrary number of [`SecureField`] values.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct CM31Column {
     pub data: Vec<PackedCM31>,
     pub length: usize,
@@ -206,7 +206,7 @@ impl<'a> BaseColumnMutSlice<'a> {
 
 /// An efficient structure for storing and operating on a arbitrary number of [`SecureField`]
 /// values.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct SecureColumn {
     pub data: Vec<PackedSecureField>,
     /// The number of [`SecureField`]s in the vector.
@@ -375,7 +375,11 @@ impl FromIterator<SecureField> for SecureColumnByCoords<SimdBackend> {
     fn from_iter<I: IntoIterator<Item = SecureField>>(iter: I) -> Self {
         let cpu_col = SecureColumnByCoords::<CpuBackend>::from_iter(iter);
         let columns = cpu_col.columns.map(|col| col.into_iter().collect());
-        SecureColumnByCoords { columns }
+        SecureColumnByCoords {
+            columns,
+            is_transposed: false,
+            device_data: std::ptr::null_mut(),
+        }
     }
 }
 
@@ -437,6 +441,8 @@ mod tests {
         let d: [BaseField; N_LANES * COL_PACKED_SIZE] = array::from_fn(BaseField::from);
         let mut col = SecureColumnByCoords {
             columns: [a, b, c, d].map(|values| values.into_iter().collect::<BaseColumn>()),
+            is_transposed: false,
+            device_data: std::ptr::null_mut(),
         };
 
         let mut rng = SmallRng::seed_from_u64(0);

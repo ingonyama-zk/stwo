@@ -120,6 +120,8 @@ mod tests {
                     values.values.clone(),
                     values.values.clone(),
                 ],
+                is_transposed: false,
+                device_data: std::ptr::null_mut(),
             };
             let secure_eval = SecureEvaluation::<CpuBackend> {
                 domain,

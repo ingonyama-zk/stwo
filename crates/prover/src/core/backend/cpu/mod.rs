@@ -19,7 +19,7 @@ use crate::core::vcs::blake2_merkle::Blake2sMerkleChannel;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::core::vcs::poseidon252_merkle::Poseidon252MerkleChannel;
 
-#[derive(Copy, Clone, Debug, Deserialize, Serialize)]
+#[derive(Copy, Clone, Debug, Deserialize, Serialize, Default)]
 pub struct CpuBackend;
 
 impl Backend for CpuBackend {}

@@ -16,6 +16,8 @@ fn folding_benchmark(c: &mut Criterion) {
             columns: std::array::from_fn(|i| {
                 vec![BaseField::from_u32_unchecked(i as u32); 1 << LOG_SIZE]
             }),
+            is_transposed: false,
+            device_data: std::ptr::null_mut(),
         },
     );
     let alpha = SecureField::from_u32_unchecked(2213980, 2213981, 2213982, 2213983);

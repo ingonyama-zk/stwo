@@ -20,7 +20,7 @@ pub mod qm31;
 pub mod quotients;
 mod utils;
 
-#[derive(Copy, Clone, Debug, Deserialize, Serialize)]
+#[derive(Copy, Clone, Debug, Deserialize, Serialize, Default)]
 pub struct SimdBackend;
 
 impl Backend for SimdBackend {}

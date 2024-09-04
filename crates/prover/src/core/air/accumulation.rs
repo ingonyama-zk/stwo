@@ -104,7 +104,8 @@ impl<B: Backend> DomainEvaluationAccumulator<B> {
 pub trait AccumulationOps: FieldOps<BaseField> + Sized {
     /// Accumulates other into column:
     ///   column = column + other.
-    fn accumulate(column: &mut SecureColumnByCoords<Self>, other: &SecureColumnByCoords<Self>);
+    fn accumulate(column: &mut SecureColumnByCoords<Self>, other: &mut SecureColumnByCoords<Self>);
+    fn confirm(column: &mut SecureColumnByCoords<Self>);
 }
 
 impl<B: Backend> DomainEvaluationAccumulator<B> {
@@ -129,7 +130,7 @@ impl<B: Backend> DomainEvaluationAccumulator<B> {
                 continue;
             };
             if let Some(prev_poly) = cur_poly {
-                let eval = SecureColumnByCoords {
+                let mut eval = SecureColumnByCoords {
                     columns: prev_poly.0.map(|c| {
                         c.evaluate_with_twiddles(
                             CanonicCoset::new(log_size as u32).circle_domain(),
@@ -137,8 +138,11 @@ impl<B: Backend> DomainEvaluationAccumulator<B> {
                         )
                         .values
                     }),
+                    is_transposed: false,
+                    device_data: std::ptr::null_mut(),
                 };
-                B::accumulate(&mut values, &eval);
+                B::accumulate(&mut values, &mut eval);
+                //B::confirm(&mut values);
             }
             cur_poly = Some(SecureCirclePoly(values.columns.map(|c| {
                 CircleEvaluation::<B, BaseField, BitReversedOrder>::new(
@@ -213,6 +217,22 @@ mod tests {
         }
 
         assert_eq!(accumulator_res, res);
+    }
+
+    #[test]
+    fn test_cpu_accumulate() {
+        const LOG_SIZE: usize = 6;
+        const SIZE: usize = 1 << LOG_SIZE;
+        let mut data = SecureColumnByCoords::<CpuBackend> {
+            columns: std::array::from_fn(|i| vec![BaseField::from_u32_unchecked(i as u32); SIZE]),
+            is_transposed: false,
+            device_data: std::ptr::null_mut(),
+        };
+        let mut data2 = data.clone();
+        let bench_id = format!("cpu accumulate SecureColumn 2^{LOG_SIZE}");
+        CpuBackend::accumulate(&mut data, &mut data2);
+        println!("cpu accumulate data2: {:?}", data2);
+        println!("cpu accumulated data: {:?}", data);
     }
 
     #[test]

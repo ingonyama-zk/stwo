@@ -1055,6 +1055,7 @@ pub fn fold_circle_into_line(
 #[cfg(test)]
 mod tests {
     use std::iter::zip;
+    use std::ptr::null_mut;
 
     use itertools::Itertools;
     use num_traits::{One, Zero};
@@ -1521,6 +1522,8 @@ mod tests {
                     Col::<CpuBackend, BaseField>::zeros(1 << (log_degree + log_blowup_factor)),
                     Col::<CpuBackend, BaseField>::zeros(1 << (log_degree + log_blowup_factor)),
                 ],
+                is_transposed: false,
+                device_data: std::ptr::null_mut(),
             },
         }
     }
@@ -1590,6 +1593,8 @@ mod tests {
                     Col::<CpuBackend, BaseField>::zeros(1 << log_domain_size),
                     Col::<CpuBackend, BaseField>::zeros(1 << log_domain_size),
                 ],
+                is_transposed: false,
+                device_data: std::ptr::null_mut(),
             },
         }
     }
