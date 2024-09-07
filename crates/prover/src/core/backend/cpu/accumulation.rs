@@ -25,6 +25,7 @@ impl AccumulationOps for CpuBackend {
         }
     }
     
+    #[cfg(feature = "icicle_poc")]
     fn confirm(column: &mut SecureColumnByCoords<Self>) {
         column.convert_from_icicle();
     }

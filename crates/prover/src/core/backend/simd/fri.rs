@@ -249,7 +249,9 @@ mod tests {
                 values.values.clone(),
                 values.values.clone(),
             ],
+            #[cfg(feature = "icicle_poc")]
             is_transposed: false,
+            #[cfg(feature = "icicle_poc")]
             device_data: std::ptr::null_mut(),
         };
         let avx_eval = SecureEvaluation {

@@ -1,7 +1,9 @@
 use std::os::raw::c_void;
 use std::ptr::slice_from_raw_parts_mut;
 
+#[cfg(feature = "icicle_poc")]
 use icicle_cuda_runtime::memory::{DeviceSlice, DeviceVec};
+#[cfg(feature = "icicle_poc")]
 use icicle_m31::field::ScalarField;
 
 use super::m31::{BaseField, M31};
@@ -18,7 +20,9 @@ pub const SECURE_EXTENSION_DEGREE: usize =
 // #[repr(C, align(8))]
 pub struct SecureColumnByCoords<B: FieldOps<BaseField>> {
     pub columns: [Col<B, BaseField>; SECURE_EXTENSION_DEGREE],
+    #[cfg(feature = "icicle_poc")]
     pub is_transposed: bool,
+    #[cfg(feature = "icicle_poc")]
     pub device_data: *mut c_void,
 }
 
@@ -29,7 +33,9 @@ where
     fn default() -> Self {
         Self {
             columns: [Col::<B, BaseField>::default(); SECURE_EXTENSION_DEGREE],
+            #[cfg(feature = "icicle_poc")]
             is_transposed: false,
+            #[cfg(feature = "icicle_poc")]
             device_data: std::ptr::null_mut(),
         }
     }
@@ -49,7 +55,9 @@ impl<B: FieldOps<BaseField>> SecureColumnByCoords<B> {
     pub fn zeros(len: usize) -> Self {
         Self {
             columns: std::array::from_fn(|_| Col::<B, BaseField>::zeros(len)),
+            #[cfg(feature = "icicle_poc")]
             is_transposed: false,
+            #[cfg(feature = "icicle_poc")]
             device_data: std::ptr::null_mut(),
         }
     }
@@ -58,7 +66,9 @@ impl<B: FieldOps<BaseField>> SecureColumnByCoords<B> {
     pub unsafe fn uninitialized(len: usize) -> Self {
         Self {
             columns: std::array::from_fn(|_| Col::<B, BaseField>::uninitialized(len)),
+            #[cfg(feature = "icicle_poc")]
             is_transposed: false,
+            #[cfg(feature = "icicle_poc")]
             device_data: std::ptr::null_mut(),
         }
     }
@@ -74,7 +84,9 @@ impl<B: FieldOps<BaseField>> SecureColumnByCoords<B> {
     pub fn to_cpu(&self) -> SecureColumnByCoords<CpuBackend> {
         SecureColumnByCoords {
             columns: self.columns.clone().map(|c| c.to_cpu()),
+            #[cfg(feature = "icicle_poc")]
             is_transposed: false,
+            #[cfg(feature = "icicle_poc")]
             device_data: std::ptr::null_mut(),
         }
     }
@@ -127,7 +139,9 @@ impl FromIterator<SecureField> for SecureColumnByCoords<CpuBackend> {
         }
         SecureColumnByCoords {
             columns,
+            #[cfg(feature = "icicle_poc")]
             is_transposed: false,
+            #[cfg(feature = "icicle_poc")]
             device_data: std::ptr::null_mut(),
         }
     }
@@ -138,7 +152,7 @@ impl From<SecureColumnByCoords<CpuBackend>> for Vec<SecureField> {
     }
 }
 
-//#[cfg(feature = "icicle_poc")]
+#[cfg(feature = "icicle_poc")]
 mod icicle_poc {
     use std::mem::{transmute, ManuallyDrop};
     use std::ptr::{self, slice_from_raw_parts, slice_from_raw_parts_mut};

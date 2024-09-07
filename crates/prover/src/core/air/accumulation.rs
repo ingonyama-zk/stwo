@@ -105,6 +105,7 @@ pub trait AccumulationOps: FieldOps<BaseField> + Sized {
     /// Accumulates other into column:
     ///   column = column + other.
     fn accumulate(column: &mut SecureColumnByCoords<Self>, other: &mut SecureColumnByCoords<Self>);
+    #[cfg(feature = "icicle_poc")]
     fn confirm(column: &mut SecureColumnByCoords<Self>);
 }
 
@@ -138,10 +139,13 @@ impl<B: Backend> DomainEvaluationAccumulator<B> {
                         )
                         .values
                     }),
+                    #[cfg(feature = "icicle_poc")]
                     is_transposed: false,
+                    #[cfg(feature = "icicle_poc")]
                     device_data: std::ptr::null_mut(),
                 };
                 B::accumulate(&mut values, &mut eval);
+                #[cfg(feature = "icicle_poc")]
                 B::confirm(&mut values);
             }
             cur_poly = Some(SecureCirclePoly(values.columns.map(|c| {
@@ -225,7 +229,9 @@ mod tests {
         const SIZE: usize = 1 << LOG_SIZE;
         let mut data = SecureColumnByCoords::<CpuBackend> {
             columns: std::array::from_fn(|i| vec![BaseField::from_u32_unchecked(i as u32); SIZE]),
+            #[cfg(feature = "icicle_poc")]
             is_transposed: false,
+            #[cfg(feature = "icicle_poc")]
             device_data: std::ptr::null_mut(),
         };
         let mut data2 = data.clone();
@@ -234,6 +240,7 @@ mod tests {
         println!("cpu accumulate data2: {:?}", data2);
         println!("cpu accumulated data: {:?}", data);
         let degree = data.columns.len() - 1;
+        #[cfg(feature = "icicle_poc")]
         data.convert_from_icicle();
         assert_eq!(data.columns[degree][SIZE - 1].0, degree as u32 * 2);
     }

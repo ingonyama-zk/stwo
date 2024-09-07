@@ -377,7 +377,9 @@ impl FromIterator<SecureField> for SecureColumnByCoords<SimdBackend> {
         let columns = cpu_col.columns.map(|col| col.into_iter().collect());
         SecureColumnByCoords {
             columns,
+            #[cfg(feature = "icicle_poc")]
             is_transposed: false,
+            #[cfg(feature = "icicle_poc")]
             device_data: std::ptr::null_mut(),
         }
     }
@@ -441,7 +443,9 @@ mod tests {
         let d: [BaseField; N_LANES * COL_PACKED_SIZE] = array::from_fn(BaseField::from);
         let mut col = SecureColumnByCoords {
             columns: [a, b, c, d].map(|values| values.into_iter().collect::<BaseColumn>()),
+            #[cfg(feature = "icicle_poc")]
             is_transposed: false,
+            #[cfg(feature = "icicle_poc")]
             device_data: std::ptr::null_mut(),
         };
 
