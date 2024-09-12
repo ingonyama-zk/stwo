@@ -9,22 +9,46 @@ const SIZE: usize = 1 << LOG_SIZE;
 
 pub fn cpu_bit_rev(c: &mut Criterion) {
     use stwo_prover::core::utils::bit_reverse;
+
+    #[cfg(not(feature = "icicle_poc"))]
     let data = (0..SIZE).map(BaseField::from).collect_vec();
+    
+    #[cfg(feature = "icicle_poc")]
+    let mut data = (0..SIZE).map(BaseField::from).collect_vec();
+
+    #[cfg(feature = "icicle_poc")]
+    use std::slice;
+
+    #[cfg(feature = "icicle_poc")]
+    use icicle_cuda_runtime::memory::{DeviceVec, HostOrDeviceSlice, HostSlice};
+    #[cfg(feature = "icicle_poc")]
+    use icicle_m31::field::ScalarField;
+    #[cfg(feature = "icicle_poc")]
+    let rr = unsafe { slice::from_raw_parts_mut(data.as_mut_ptr() as *mut ScalarField, SIZE) };
+    #[cfg(feature = "icicle_poc")]
+    let v = HostSlice::from_mut_slice(rr);
+    #[cfg(feature = "icicle_poc")]
+    let mut data = DeviceVec::cuda_malloc(SIZE).unwrap();
+    #[cfg(feature = "icicle_poc")]
+    data.copy_from_host(v).unwrap();
+    #[cfg(feature = "icicle_poc")]
+    let rr = unsafe { slice::from_raw_parts_mut(data.as_mut_ptr() as *mut ScalarField, SIZE) };
 
     let bench_id = &format!("cpu bit_rev 2^{LOG_SIZE}");
     c.bench_function(bench_id, |b| {
+        #[cfg(not(feature = "icicle_poc"))]
         b.iter_batched(
             || data.clone(),
             |mut data| bit_reverse(&mut data),
             BatchSize::LargeInput,
         );
+
+        #[cfg(feature = "icicle_poc")]
+        {
+            b.iter(|| bit_reverse(rr));
+        }
     });
 }
-
-// use stwo_prover::core::backend::simd::column::BaseColumn;
-// const SIZE: usize = 1 << 26;
-// let data = (0..SIZE).map(BaseField::from).collect::<BaseColumn>();
-// c.bench_function("simd bit_rev 26bit", |b| {
 
 pub fn simd_bit_rev(c: &mut Criterion) {
     use stwo_prover::core::backend::simd::bit_reverse::bit_reverse_m31;
