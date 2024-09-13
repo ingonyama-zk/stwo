@@ -72,10 +72,7 @@ impl MleOps<SecureField> for IcicleBackend {
 
 // stwo/crates/prover/src/core/backend/cpu/accumulation.rs
 impl AccumulationOps for IcicleBackend {
-    fn accumulate(
-        column: &mut SecureColumnByCoords<Self>,
-        other: &mut SecureColumnByCoords<Self>,
-    ) {
+    fn accumulate(column: &mut SecureColumnByCoords<Self>, other: &mut SecureColumnByCoords<Self>) {
         todo!()
     }
 

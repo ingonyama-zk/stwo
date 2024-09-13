@@ -227,7 +227,7 @@ mod icicle_poc {
                 let zero = ScalarField::zero();
 
                 let n = self.columns[0].len();
-                let secure_degree = self .columns.len();
+                let secure_degree = self.columns.len();
                 let mut intermediate_host = vec![zero; secure_degree * n];
 
                 use crate::core::SecureField;
@@ -235,7 +235,8 @@ mod icicle_poc {
 
                 let mut red_u32_d = self.as_icicle_slice_mut();
 
-                let mut result_tr: DeviceVec<ScalarField> = DeviceVec::cuda_malloc(secure_degree * n).unwrap();
+                let mut result_tr: DeviceVec<ScalarField> =
+                    DeviceVec::cuda_malloc(secure_degree * n).unwrap();
 
                 transpose_matrix(
                     red_u32_d,
@@ -258,7 +259,7 @@ mod icicle_poc {
                 for i in 0..secure_degree {
                     let start = i * n;
                     let end = start + n;
-                    
+
                     self.columns[i].truncate(0);
                     self.columns[i].extend_from_slice(&res[start..end]);
                 }

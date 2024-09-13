@@ -12,7 +12,7 @@ pub fn cpu_bit_rev(c: &mut Criterion) {
 
     #[cfg(not(feature = "icicle_poc"))]
     let data = (0..SIZE).map(BaseField::from).collect_vec();
-    
+
     #[cfg(feature = "icicle_poc")]
     let mut data = (0..SIZE).map(BaseField::from).collect_vec();
 

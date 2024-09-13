@@ -173,7 +173,8 @@ pub fn bit_reverse<T>(v: &mut [T]) {
             let mut v_ptr = v.as_mut_ptr() as *mut F;
             let rr = unsafe { slice::from_raw_parts_mut(v_ptr, n) };
 
-            // means data already on device (some finite device id, instead of huge number for host pointer)
+            // means data already on device (some finite device id, instead of huge number for host
+            // pointer)
             if get_device_from_pointer(v_ptr as _).unwrap() <= 1024 {
                 bit_reverse_inplace(unsafe { DeviceSlice::from_mut_slice(rr) }, &cfg).unwrap();
             } else {
