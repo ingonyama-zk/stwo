@@ -7,7 +7,7 @@ use stwo_prover::core::backend::simd::SimdBackend;
 use stwo_prover::core::fields::m31::BaseField;
 use stwo_prover::core::fields::secure_column::SecureColumnByCoords;
 
-const LOG_SIZE: usize = 26;
+const LOG_SIZE: usize = 28;
 const SIZE: usize = 1 << LOG_SIZE;
 
 pub fn cpu_accumulate(c: &mut Criterion) {
