@@ -1522,10 +1522,6 @@ mod tests {
                     Col::<CpuBackend, BaseField>::zeros(1 << (log_degree + log_blowup_factor)),
                     Col::<CpuBackend, BaseField>::zeros(1 << (log_degree + log_blowup_factor)),
                 ],
-                #[cfg(feature = "icicle_poc")]
-                is_transposed: false,
-                #[cfg(feature = "icicle_poc")]
-                device_data: std::ptr::null_mut(),
             },
         }
     }
@@ -1595,10 +1591,6 @@ mod tests {
                     Col::<CpuBackend, BaseField>::zeros(1 << log_domain_size),
                     Col::<CpuBackend, BaseField>::zeros(1 << log_domain_size),
                 ],
-                #[cfg(feature = "icicle_poc")]
-                is_transposed: false,
-                #[cfg(feature = "icicle_poc")]
-                device_data: std::ptr::null_mut(),
             },
         }
     }

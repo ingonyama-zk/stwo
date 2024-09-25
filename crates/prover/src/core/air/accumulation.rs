@@ -104,9 +104,7 @@ impl<B: Backend> DomainEvaluationAccumulator<B> {
 pub trait AccumulationOps: FieldOps<BaseField> + Sized {
     /// Accumulates other into column:
     ///   column = column + other.
-    fn accumulate(column: &mut SecureColumnByCoords<Self>, other: &mut SecureColumnByCoords<Self>);
-    #[cfg(feature = "icicle_poc")]
-    fn confirm(column: &mut SecureColumnByCoords<Self>);
+    fn accumulate(column: &mut SecureColumnByCoords<Self>, other: &SecureColumnByCoords<Self>);
 }
 
 impl<B: Backend> DomainEvaluationAccumulator<B> {
@@ -139,14 +137,8 @@ impl<B: Backend> DomainEvaluationAccumulator<B> {
                         )
                         .values
                     }),
-                    #[cfg(feature = "icicle_poc")]
-                    is_transposed: false,
-                    #[cfg(feature = "icicle_poc")]
-                    device_data: std::ptr::null_mut(),
                 };
                 B::accumulate(&mut values, &mut eval);
-                #[cfg(feature = "icicle_poc")]
-                B::confirm(&mut values);
             }
             cur_poly = Some(SecureCirclePoly(values.columns.map(|c| {
                 CircleEvaluation::<B, BaseField, BitReversedOrder>::new(
@@ -178,7 +170,8 @@ impl<'a> ColumnAccumulator<'a, CpuBackend> {
 
 #[cfg(test)]
 mod tests {
-    use std::array;
+    use std::iter::from_fn;
+    use std::{array, vec};
 
     use num_traits::Zero;
     use rand::rngs::SmallRng;
@@ -187,7 +180,8 @@ mod tests {
     use super::*;
     use crate::core::backend::cpu::CpuCircleEvaluation;
     use crate::core::circle::CirclePoint;
-    use crate::core::fields::m31::{M31, P};
+    use crate::core::fields::m31::{M31, MODULUS_BITS, P};
+    use crate::core::fields::secure_column::SECURE_EXTENSION_DEGREE;
     use crate::qm31;
 
     #[test]
@@ -225,31 +219,82 @@ mod tests {
 
     #[test]
     fn test_cpu_accumulate() {
-        const LOG_SIZE: usize = 6;
+        const LOG_SIZE: usize = 8;
         const SIZE: usize = 1 << LOG_SIZE;
+        let mut rng = SmallRng::seed_from_u64(0);
         let mut data = SecureColumnByCoords::<CpuBackend> {
-            columns: std::array::from_fn(|i| vec![BaseField::from_u32_unchecked(i as u32); SIZE]),
-            #[cfg(feature = "icicle_poc")]
-            is_transposed: false,
-            #[cfg(feature = "icicle_poc")]
-            device_data: std::ptr::null_mut(),
+            columns: std::array::from_fn(|j| {
+                let mut vec = Vec::with_capacity(SIZE);
+                for i in 0..SIZE {
+                    let idx = (j * i + i) as u32;
+                    vec.push(BaseField::from_u32_unchecked(
+                        idx * rng.gen_range(0..(P / (idx + 1))),
+                        //BaseField::reduce(idx as u64 * idx as u64).0,
+                    ));
+                }
+                vec
+            }),
         };
-        let mut data2 = data.clone();
-        let bench_id = format!("cpu accumulate SecureColumn 2^{LOG_SIZE}");
+        let mut data2 = SecureColumnByCoords::<CpuBackend> {
+            columns: std::array::from_fn(|j| {
+                let mut vec = Vec::with_capacity(SIZE);
+                for i in 0..SIZE {
+                    let idx = (j * i + i) as u32;
+                    vec.push(BaseField::from_u32_unchecked(
+                        idx * rng.gen_range(0..(P / (idx + 1))),
+                        //BaseField::reduce(idx as u64 * idx as u64).0,
+                    ));
+                }
+                vec
+            }),
+        };
+
+        let mut data_expected = data.clone();
+
+        for i in 0..data_expected.len() {
+            let res_coeff = data_expected.at(i) + data2.at(i);
+            data_expected.set(i, res_coeff);
+        }
+        
+        /*
+        let mut data = SecureColumnByCoords {
+            columns: [
+                vec![M31(0), M31(1123301862), M31(1123301862), M31(1123301862), M31(1123301862), M31(1123301862), M31(1123301862), M31(1123301862), M31(1123301862), M31(1123301862), M31(1123301862), M31(1123301862), M31(1123301862), M31(1123301862), M31(1123301862), M31(1123301862)],
+                vec![M31(0), M31(1265470630), M31(1265470630), M31(1265470630), M31(1265470630), M31(1265470630), M31(1265470630), M31(1265470630), M31(1265470630), M31(1265470630), M31(1265470630), M31(1265470630), M31(1265470630), M31(1265470630), M31(1265470630), M31(1265470630)],
+                vec![M31(0), M31(1376299788), M31(1376299788), M31(1376299788), M31(1376299788), M31(1376299788), M31(1376299788), M31(1376299788), M31(1376299788), M31(1376299788), M31(1376299788), M31(1376299788), M31(1376299788), M31(1376299788), M31(1376299788), M31(1376299788)],
+                vec![M31(0), M31(261781899), M31(261781899), M31(261781899), M31(261781899), M31(261781899), M31(261781899), M31(261781899), M31(261781899), M31(261781899), M31(261781899), M31(261781899), M31(261781899), M31(261781899), M31(261781899), M31(261781899)]
+            ],
+        };
+    
+        // Initialize the other column
+        let mut data2 = SecureColumnByCoords {
+            columns: [
+                vec![M31(551851073), M31(1966359635), M31(60495258), M31(95239144), M31(482701047), M31(1185819096), M31(1727389749), M31(2051633032), M31(1966359635), M31(482701047), M31(95239144), M31(1727389749), M31(1185819096), M31(60495258), M31(2051633032), M31(551851073)],
+                vec![M31(770576572), M31(286302789), M31(2030849159), M31(1899007477), M31(1470409867), M31(1077441734), M31(1993494709), M31(982084208), M31(286302789), M31(1470409867), M31(1899007477), M31(1993494709), M31(1077441734), M31(2030849159), M31(982084208), M31(770576572)],
+                vec![M31(1803935327), M31(918583773), M31(1929259203), M31(61821079), M31(1320044489), M31(1011719587), M31(1703889628), M31(871058625), M31(918583773), M31(1320044489), M31(61821079), M31(1703889628), M31(1011719587), M31(1929259203), M31(871058625), M31(1803935327)],
+                vec![M31(1872236315), M31(689379415), M31(1761509249), M31(263034866), M31(1013967875), M31(515667748), M31(1762562054), M31(982312328), M31(689379415), M31(1013967875), M31(263034866), M31(1762562054), M31(515667748), M31(1761509249), M31(982312328), M31(1872236315)]
+            ],
+        };
+    
+        // Initialize the output column
+        let data_expected: SecureColumnByCoords<CpuBackend> = SecureColumnByCoords {
+            columns: [
+                vec![M31(551851073), M31(942177850), M31(1183797120), M31(1218541006), M31(1606002909), M31(161637311), M31(703207964), M31(1027451247), M31(942177850), M31(1606002909), M31(1218541006), M31(703207964), M31(161637311), M31(1183797120), M31(1027451247), M31(1675152935)],
+                vec![M31(770576572), M31(1551773419), M31(1148836142), M31(1016994460), M31(588396850), M31(195428717), M31(1111481692), M31(100071191), M31(1551773419), M31(588396850), M31(1016994460), M31(1111481692), M31(195428717), M31(1148836142), M31(100071191), M31(2036047202)],
+                vec![M31(1803935327), M31(147399914), M31(1158075344), M31(1438120867), M31(548860630), M31(240535728), M31(932705769), M31(99874766), M31(147399914), M31(548860630), M31(1438120867), M31(932705769), M31(240535728), M31(1158075344), M31(99874766), M31(1032751468)],
+                vec![M31(1872236315), M31(951161314), M31(2023291148), M31(524816765), M31(1275749774), M31(777449647), M31(2024343953), M31(1244094227), M31(951161314), M31(1275749774), M31(524816765), M31(2024343953), M31(777449647), M31(2023291148), M31(1244094227), M31(2134018214)]
+            ],
+        };
+        */
         CpuBackend::accumulate(&mut data, &mut data2);
-        println!("cpu accumulate data2: {:?}", data2);
-        println!("cpu accumulated data: {:?}", data);
-        let degree = data.columns.len() - 1;
-        #[cfg(feature = "icicle_poc")]
-        data.convert_from_icicle();
-        assert_eq!(data.columns[degree][SIZE - 1].0, degree as u32 * 2);
+        assert_eq!(data.columns, data_expected.columns);
     }
 
     #[test]
     fn test_domain_evaluation_accumulator() {
         // Generate a vector of random sizes with a constant seed.
         let mut rng = SmallRng::seed_from_u64(0);
-        const LOG_SIZE_MIN: u32 = 4;
+        const LOG_SIZE_MIN: u32 = 3;
         const LOG_SIZE_BOUND: u32 = 10;
         const MASK: u32 = P;
         let mut log_sizes = (0..100)
@@ -263,6 +308,8 @@ mod tests {
             .map(|log_size| {
                 (0..(1 << *log_size))
                     .map(|_| M31::from_u32_unchecked(rng.gen::<u32>() & MASK))
+                    // .map(|j| M31::from_u32_unchecked(if j == 0 { j } else { 1 }))
+                    // .map(|j| M31::from_u32_unchecked(j & MASK))
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();

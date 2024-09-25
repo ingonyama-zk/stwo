@@ -20,10 +20,6 @@ pub const SECURE_EXTENSION_DEGREE: usize =
 // #[repr(C, align(8))]
 pub struct SecureColumnByCoords<B: FieldOps<BaseField>> {
     pub columns: [Col<B, BaseField>; SECURE_EXTENSION_DEGREE],
-    #[cfg(feature = "icicle_poc")]
-    pub is_transposed: bool,
-    #[cfg(feature = "icicle_poc")]
-    pub device_data: *mut c_void,
 }
 
 impl<B: FieldOps<BaseField>> Default for SecureColumnByCoords<B>
@@ -33,10 +29,6 @@ where
     fn default() -> Self {
         Self {
             columns: [Col::<B, BaseField>::default(); SECURE_EXTENSION_DEGREE],
-            #[cfg(feature = "icicle_poc")]
-            is_transposed: false,
-            #[cfg(feature = "icicle_poc")]
-            device_data: std::ptr::null_mut(),
         }
     }
 }
@@ -55,10 +47,6 @@ impl<B: FieldOps<BaseField>> SecureColumnByCoords<B> {
     pub fn zeros(len: usize) -> Self {
         Self {
             columns: std::array::from_fn(|_| Col::<B, BaseField>::zeros(len)),
-            #[cfg(feature = "icicle_poc")]
-            is_transposed: false,
-            #[cfg(feature = "icicle_poc")]
-            device_data: std::ptr::null_mut(),
         }
     }
 
@@ -66,10 +54,6 @@ impl<B: FieldOps<BaseField>> SecureColumnByCoords<B> {
     pub unsafe fn uninitialized(len: usize) -> Self {
         Self {
             columns: std::array::from_fn(|_| Col::<B, BaseField>::uninitialized(len)),
-            #[cfg(feature = "icicle_poc")]
-            is_transposed: false,
-            #[cfg(feature = "icicle_poc")]
-            device_data: std::ptr::null_mut(),
         }
     }
 
@@ -84,10 +68,6 @@ impl<B: FieldOps<BaseField>> SecureColumnByCoords<B> {
     pub fn to_cpu(&self) -> SecureColumnByCoords<CpuBackend> {
         SecureColumnByCoords {
             columns: self.columns.clone().map(|c| c.to_cpu()),
-            #[cfg(feature = "icicle_poc")]
-            is_transposed: false,
-            #[cfg(feature = "icicle_poc")]
-            device_data: std::ptr::null_mut(),
         }
     }
 
@@ -137,13 +117,7 @@ impl FromIterator<SecureField> for SecureColumnByCoords<CpuBackend> {
                 columns[j].push(vals[j]);
             }
         }
-        SecureColumnByCoords {
-            columns,
-            #[cfg(feature = "icicle_poc")]
-            is_transposed: false,
-            #[cfg(feature = "icicle_poc")]
-            device_data: std::ptr::null_mut(),
-        }
+        SecureColumnByCoords { columns }
     }
 }
 impl From<SecureColumnByCoords<CpuBackend>> for Vec<SecureField> {
@@ -154,8 +128,11 @@ impl From<SecureColumnByCoords<CpuBackend>> for Vec<SecureField> {
 
 #[cfg(feature = "icicle_poc")]
 mod icicle_poc {
+    use std::ffi::c_void;
     use std::mem::{transmute, ManuallyDrop};
-    use std::ptr::{self, slice_from_raw_parts, slice_from_raw_parts_mut};
+    use std::ptr::{
+        self, null_mut, slice_from_raw_parts, slice_from_raw_parts_mut,
+    };
 
     use icicle_core::ntt::FieldImpl;
     use icicle_core::vec_ops::{accumulate_scalars, stwo_convert, transpose_matrix, VecOpsConfig};
@@ -169,134 +146,72 @@ mod icicle_poc {
     use crate::core::backend::simd::column;
     use crate::core::backend::CpuBackend;
     use crate::core::fields::m31::BaseField;
+    use crate::core::fields::qm31::SecureField;
     use crate::core::fields::FieldOps;
 
     impl SecureColumnByCoords<CpuBackend> {
-        // TODO: implement geneics
-        pub fn as_icicle_slice_mut(&self) -> &mut DeviceSlice<ScalarField> {
-            self.as_icicle_device_slice_mut::<ScalarField>()
+        pub fn convert_to_icicle(input: &Self, d_output: &mut DeviceSlice::<ExtensionField>) {
+            let zero = ScalarField::zero();
+
+            let n = input.columns[0].len();
+            let secure_degree = input.columns.len();
+            let mut intermediate_host = vec![zero; secure_degree * n];
+
+            use crate::core::SecureField;
+            let cfg = VecOpsConfig::default();
+
+            let a: &[u32] = unsafe { transmute(input.columns[0].as_slice()) };
+            let b: &[u32] = unsafe { transmute(input.columns[1].as_slice()) };
+            let c: &[u32] = unsafe { transmute(input.columns[2].as_slice()) };
+            let d: &[u32] = unsafe { transmute(input.columns[3].as_slice()) };
+
+            let a = HostSlice::from_slice(&a);
+            let b = HostSlice::from_slice(&b);
+            let c = HostSlice::from_slice(&c);
+            let d = HostSlice::from_slice(&d);
+
+            stwo_convert(a, b, c, d, d_output);
         }
 
-        pub fn as_icicle_ext_slice_mut(&self) -> &mut DeviceSlice<ExtensionField> {
-            self.as_icicle_device_slice_mut::<ExtensionField>()
-        }
+        pub fn convert_from_icicle(input: &mut Self, d_input: &mut DeviceSlice::<ScalarField>) {
+            let zero = ScalarField::zero();
 
-        pub fn as_icicle_device_slice_mut<T>(&self) -> &mut DeviceSlice<T> {
-            unsafe {
-                DeviceSlice::from_mut_slice(&mut *slice_from_raw_parts_mut(
-                    self.device_data as *mut T,
-                    self.len(),
-                ))
-            }
-        }
+            let n = input.columns[0].len();
+            let secure_degree = input.columns.len();
+            let mut intermediate_host = vec![zero; secure_degree * n];
 
-        pub fn convert_to_icicle(&mut self) {
-            if !self.is_transposed {
-                let zero = ScalarField::zero();
+            use crate::core::SecureField;
+            let cfg = VecOpsConfig::default();
 
-                let n = self.columns[0].len();
-                let mut intermediate_host = vec![zero; 4 * n];
+            let mut result_tr: DeviceVec<ScalarField> =
+                DeviceVec::cuda_malloc(secure_degree * n).unwrap();
 
-                // use std::ptr::from_raw_parts;
-                use crate::core::SecureField;
-                let cfg = VecOpsConfig::default();
-
-                let a: &[u32] = unsafe { transmute(self.columns[0].as_slice()) };
-                let b: &[u32] = unsafe { transmute(self.columns[1].as_slice()) };
-                let c: &[u32] = unsafe { transmute(self.columns[2].as_slice()) };
-                let d: &[u32] = unsafe { transmute(self.columns[3].as_slice()) };
-
-                let a = HostSlice::from_slice(&a);
-                let b = HostSlice::from_slice(&b);
-                let c = HostSlice::from_slice(&c);
-                let d = HostSlice::from_slice(&d);
-
-                let mut col_a =
-                    ManuallyDrop::new(DeviceVec::<ExtensionField>::cuda_malloc(n).unwrap());
-
-                stwo_convert(a, b, c, d, &mut col_a[..]);
-
-                self.device_data = unsafe { col_a.as_mut_ptr() } as _;
-                self.is_transposed = true;
-            }
-        }
-
-        pub fn convert_from_icicle(&mut self) {
-            if self.is_transposed {
-                assert!(!self.device_data.is_null());
-                let zero = ScalarField::zero();
-
-                let n = self.columns[0].len();
-                let secure_degree = self .columns.len();
-                let mut intermediate_host = vec![zero; secure_degree * n];
-
-                use crate::core::SecureField;
-                let cfg = VecOpsConfig::default();
-
-                let mut red_u32_d = self.as_icicle_slice_mut();
-
-                let mut result_tr: DeviceVec<ScalarField> = DeviceVec::cuda_malloc(secure_degree * n).unwrap();
-
-                transpose_matrix(
-                    red_u32_d,
-                    secure_degree as u32,
-                    n as u32,
-                    &mut result_tr[..],
-                    &DeviceContext::default(),
-                    true,
-                    false,
-                )
-                .unwrap();
-                let mut res_host = HostSlice::from_mut_slice(&mut intermediate_host[..]);
-                result_tr.copy_to_host(res_host).unwrap();
-
-                use crate::core::fields::m31::M31;
-
-                let res: Vec<M31> = unsafe { transmute(intermediate_host) };
-
-                // Assign the sub-slices to the column
-                for i in 0..secure_degree {
-                    let start = i * n;
-                    let end = start + n;
-                    
-                    self.columns[i].truncate(0);
-                    self.columns[i].extend_from_slice(&res[start..end]);
-                }
-                self.is_transposed = false;
-
-                unsafe { self.as_icicle_slice_mut().cuda_free().unwrap() }
-            }
-        }
-    }
-
-    impl<T> HostOrDeviceSlice<T> for SecureColumnByCoords<CpuBackend> {
-        fn is_on_device(&self) -> bool {
-            self.is_transposed && !self.device_data.is_null()
-        }
-
-        fn device_id(&self) -> Option<usize> {
-            Some(
-                get_device_from_pointer(unsafe {
-                    self.device_data as *const ::std::os::raw::c_void
-                })
-                .expect("Invalid pointer. Maybe host pointer was used here?"),
+            transpose_matrix(
+                d_input,
+                secure_degree as u32,
+                n as u32,
+                &mut result_tr[..],
+                &DeviceContext::default(),
+                true,
+                false,
             )
-        }
+            .unwrap();
 
-        unsafe fn as_ptr(&self) -> *const T {
-            self.columns.as_ptr() as _
-        }
+            let mut res_host = HostSlice::from_mut_slice(&mut intermediate_host[..]);
+            result_tr.copy_to_host(res_host).unwrap();
 
-        unsafe fn as_mut_ptr(&mut self) -> *mut T {
-            self.columns.as_mut_ptr() as _
-        }
+            use crate::core::fields::m31::M31;
 
-        fn len(&self) -> usize {
-            self.columns[0].len() * self.columns.len()
-        }
+            let res: Vec<M31> = unsafe { transmute(intermediate_host) };
 
-        fn is_empty(&self) -> bool {
-            self.len() == 0
+            // Assign the sub-slices to the column
+            for i in 0..secure_degree {
+                let start = i * n;
+                let end = start + n;
+
+                input.columns[i].truncate(0);
+                input.columns[i].extend_from_slice(&res[start..end]);
+            }
         }
     }
 }

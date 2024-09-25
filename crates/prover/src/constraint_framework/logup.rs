@@ -213,10 +213,6 @@ impl LogupTraceGenerator {
         let coord_prefix_sum = last_col_coords.map(inclusive_prefix_sum);
         self.trace.push(SecureColumnByCoords {
             columns: coord_prefix_sum,
-            #[cfg(feature = "icicle_poc")]
-            is_transposed: false,
-            #[cfg(feature = "icicle_poc")]
-            device_data: std::ptr::null_mut(),
         });
 
         let trace = self

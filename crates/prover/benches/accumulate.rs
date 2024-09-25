@@ -13,10 +13,6 @@ const SIZE: usize = 1 << LOG_SIZE;
 pub fn cpu_accumulate(c: &mut Criterion) {
     let mut data = SecureColumnByCoords::<CpuBackend> {
         columns: std::array::from_fn(|i| vec![BaseField::from_u32_unchecked(i as u32); SIZE]),
-        #[cfg(feature = "icicle_poc")]
-        is_transposed: false,
-        #[cfg(feature = "icicle_poc")]
-        device_data: std::ptr::null_mut(),
     };
     let mut data2 = data.clone();
     let bench_id = format!("cpu accumulate SecureColumn 2^{LOG_SIZE}");
@@ -28,20 +24,10 @@ pub fn cpu_accumulate(c: &mut Criterion) {
 pub fn simd_accumulate(c: &mut Criterion) {
     let cpu_col = SecureColumnByCoords::<CpuBackend> {
         columns: std::array::from_fn(|i| vec![BaseField::from_u32_unchecked(i as u32); SIZE]),
-        #[cfg(feature = "icicle_poc")]
-        is_transposed: false,
-        #[cfg(feature = "icicle_poc")]
-        device_data: std::ptr::null_mut(),
     };
 
     let columns = cpu_col.columns.map(|col| col.into_iter().collect());
-    let data = SecureColumnByCoords::<SimdBackend> {
-        columns,
-        #[cfg(feature = "icicle_poc")]
-        is_transposed: false,
-        #[cfg(feature = "icicle_poc")]
-        device_data: std::ptr::null_mut(),
-    };
+    let data = SecureColumnByCoords::<SimdBackend> { columns };
 
     let mut data2 = data.clone();
     let bench_id = format!("simd accumulate SecureColumn 2^{LOG_SIZE}");
