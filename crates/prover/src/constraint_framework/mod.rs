@@ -2,6 +2,7 @@
 mod assert;
 mod component;
 pub mod constant_columns;
+mod cpu_domain;
 mod info;
 pub mod logup;
 mod point;
@@ -12,7 +13,7 @@ use std::fmt::Debug;
 use std::ops::{Add, AddAssign, Mul, Neg, Sub};
 
 pub use assert::{assert_constraints, AssertEvaluator};
-pub use component::FrameworkComponent;
+pub use component::{FrameworkComponent, FrameworkEval, TraceLocationAllocator};
 pub use info::InfoEvaluator;
 use num_traits::{One, Zero};
 pub use point::PointEvaluator;
@@ -25,7 +26,7 @@ use crate::core::fields::FieldExpOps;
 
 /// A trait for evaluating expressions at some point or row.
 pub trait EvalAtRow {
-    // TODO(spapini): Use a better trait for these, like 'Algebra' or something.
+    // TODO(Ohad): Use a better trait for these, like 'Algebra' or something.
     /// The field type holding values of columns for the component. These are the inputs to the
     /// constraints. It might be [BaseField] packed types, or even [SecureField], when evaluating
     /// the columns out of domain.
@@ -34,7 +35,7 @@ pub trait EvalAtRow {
         + Debug
         + Zero
         + Neg<Output = Self::F>
-        + AddAssign<Self::F>
+        + AddAssign
         + AddAssign<BaseField>
         + Add<Self::F, Output = Self::F>
         + Sub<Self::F, Output = Self::F>
@@ -52,6 +53,7 @@ pub trait EvalAtRow {
         + Zero
         + From<Self::F>
         + Neg<Output = Self::EF>
+        + AddAssign
         + Add<SecureField, Output = Self::EF>
         + Sub<SecureField, Output = Self::EF>
         + Mul<SecureField, Output = Self::EF>

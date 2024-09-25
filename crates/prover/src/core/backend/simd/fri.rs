@@ -12,12 +12,14 @@ use crate::core::backend::Column;
 use crate::core::fields::m31::BaseField;
 use crate::core::fields::qm31::SecureField;
 use crate::core::fields::secure_column::SecureColumnByCoords;
-use crate::core::fri::{self, FriOps};
+use crate::core::fri::{self, fold_circle_into_line, FriOps};
 use crate::core::poly::circle::SecureEvaluation;
 use crate::core::poly::line::LineEvaluation;
 use crate::core::poly::twiddles::TwiddleTree;
 use crate::core::poly::utils::domain_line_twiddles_from_tree;
+use crate::core::poly::BitReversedOrder;
 
+// TODO(andrew) Is this optimized?
 impl FriOps for SimdBackend {
     fn fold_line(
         eval: &LineEvaluation<Self>,
@@ -57,12 +59,21 @@ impl FriOps for SimdBackend {
 
     fn fold_circle_into_line(
         dst: &mut LineEvaluation<Self>,
-        src: &SecureEvaluation<Self>,
+        src: &SecureEvaluation<Self, BitReversedOrder>,
         alpha: SecureField,
         twiddles: &TwiddleTree<Self>,
     ) {
         let log_size = src.len().ilog2();
-        assert!(log_size > LOG_N_LANES, "Evaluation too small");
+        if log_size <= LOG_N_LANES {
+            // Fall back to CPU implementation.
+            let mut cpu_dst = dst.to_cpu();
+            fold_circle_into_line(&mut cpu_dst, &src.to_cpu(), alpha);
+            *dst = LineEvaluation::new(
+                cpu_dst.domain(),
+                SecureColumnByCoords::from_cpu(cpu_dst.values),
+            );
+            return;
+        }
 
         let domain = src.domain;
         let alpha_sq = alpha * alpha;
@@ -96,7 +107,9 @@ impl FriOps for SimdBackend {
         }
     }
 
-    fn decompose(eval: &SecureEvaluation<Self>) -> (SecureEvaluation<Self>, SecureField) {
+    fn decompose(
+        eval: &SecureEvaluation<Self, BitReversedOrder>,
+    ) -> (SecureEvaluation<Self, BitReversedOrder>, SecureField) {
         let lambda = decomposition_coefficient(eval);
         let broadcasted_lambda = PackedSecureField::broadcast(lambda);
         let mut g_values = SecureColumnByCoords::<Self>::zeros(eval.len());
@@ -112,10 +125,7 @@ impl FriOps for SimdBackend {
             unsafe { g_values.set_packed(i, val) }
         }
 
-        let g = SecureEvaluation {
-            domain: eval.domain,
-            values: g_values,
-        };
+        let g = SecureEvaluation::new(eval.domain, g_values);
         (g, lambda)
     }
 }
@@ -123,7 +133,9 @@ impl FriOps for SimdBackend {
 /// See [`decomposition_coefficient`].
 ///
 /// [`decomposition_coefficient`]: crate::core::backend::cpu::CpuBackend::decomposition_coefficient
-fn decomposition_coefficient(eval: &SecureEvaluation<SimdBackend>) -> SecureField {
+fn decomposition_coefficient(
+    eval: &SecureEvaluation<SimdBackend, BitReversedOrder>,
+) -> SecureField {
     let cols = &eval.values.columns;
     let [mut x_sum, mut y_sum, mut z_sum, mut w_sum] = [PackedBaseField::zero(); 4];
 
@@ -167,6 +179,7 @@ mod tests {
     use crate::core::fri::FriOps;
     use crate::core::poly::circle::{CanonicCoset, CirclePoly, PolyOps, SecureEvaluation};
     use crate::core::poly::line::{LineDomain, LineEvaluation};
+    use crate::core::poly::BitReversedOrder;
     use crate::qm31;
 
     #[test]
@@ -206,10 +219,7 @@ mod tests {
         );
         CpuBackend::fold_circle_into_line(
             &mut cpu_fold,
-            &SecureEvaluation {
-                domain: circle_domain,
-                values: values.iter().copied().collect(),
-            },
+            &SecureEvaluation::new(circle_domain, values.iter().copied().collect()),
             alpha,
             &CpuBackend::precompute_twiddles(line_domain.coset()),
         );
@@ -220,10 +230,7 @@ mod tests {
         );
         SimdBackend::fold_circle_into_line(
             &mut simd_fold,
-            &SecureEvaluation {
-                domain: circle_domain,
-                values: values.iter().copied().collect(),
-            },
+            &SecureEvaluation::new(circle_domain, values.iter().copied().collect()),
             alpha,
             &SimdBackend::precompute_twiddles(line_domain.coset()),
         );
@@ -250,16 +257,10 @@ mod tests {
                 values.values.clone(),
             ],
         };
-        let avx_eval = SecureEvaluation {
-            domain,
-            values: avx_column.clone(),
-        };
-        let cpu_eval = SecureEvaluation::<CpuBackend> {
-            domain,
-            values: avx_eval.to_cpu(),
-        };
+        let avx_eval = SecureEvaluation::new(domain, avx_column.clone());
+        let cpu_eval =
+            SecureEvaluation::<CpuBackend, BitReversedOrder>::new(domain, avx_eval.values.to_cpu());
         let (cpu_g, cpu_lambda) = CpuBackend::decompose(&cpu_eval);
-
         let (avx_g, avx_lambda) = SimdBackend::decompose(&avx_eval);
 
         assert_eq!(avx_lambda, cpu_lambda);

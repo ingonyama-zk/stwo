@@ -1,1 +1,1 @@
-pub mod prefix_sum_constraints;
+pub mod gkr_lookups;

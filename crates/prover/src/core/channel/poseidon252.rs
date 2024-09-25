@@ -32,7 +32,7 @@ impl Poseidon252Channel {
         res
     }
 
-    // TODO(spapini): Understand if we really need uniformity here.
+    // TODO(shahars): Understand if we really need uniformity here.
     /// Generates a close-to uniform random vector of BaseField elements.
     fn draw_base_felts(&mut self) -> [BaseField; 8] {
         let shift = (1u64 << 31).into();
@@ -56,12 +56,11 @@ impl Poseidon252Channel {
 impl Channel for Poseidon252Channel {
     const BYTES_PER_HASH: usize = BYTES_PER_FELT252;
 
-    fn leading_zeros(&self) -> u32 {
+    fn trailing_zeros(&self) -> u32 {
         let bytes = self.digest.to_bytes_be();
-        u128::from_le_bytes(std::array::from_fn(|i| bytes[i])).leading_zeros()
+        u128::from_le_bytes(std::array::from_fn(|i| bytes[i])).trailing_zeros()
     }
 
-    // TODO(spapini): Optimize.
     fn mix_felts(&mut self, felts: &[SecureField]) {
         let shift = (1u64 << 31).into();
         let mut res = Vec::with_capacity(felts.len() / 2 + 2);
@@ -77,11 +76,11 @@ impl Channel for Poseidon252Channel {
             );
         }
 
-        // TODO(spapini): do we need length padding?
+        // TODO(shahars): do we need length padding?
         self.update_digest(poseidon_hash_many(&res));
     }
 
-    fn mix_nonce(&mut self, nonce: u64) {
+    fn mix_u64(&mut self, nonce: u64) {
         self.update_digest(poseidon_hash(self.digest, nonce.into()));
     }
 

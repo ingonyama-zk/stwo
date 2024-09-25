@@ -1,12 +1,7 @@
-use std::os::raw::c_void;
-use std::ptr::slice_from_raw_parts_mut;
+use std::array;
+use std::iter::zip;
 
-#[cfg(feature = "icicle_poc")]
-use icicle_cuda_runtime::memory::{DeviceSlice, DeviceVec};
-#[cfg(feature = "icicle_poc")]
-use icicle_m31::field::ScalarField;
-
-use super::m31::{BaseField, M31};
+use super::m31::BaseField;
 use super::qm31::SecureField;
 use super::{ExtensionOf, FieldOps};
 use crate::core::backend::{Col, Column, ColumnOps, CpuBackend};
@@ -22,19 +17,8 @@ pub struct SecureColumnByCoords<B: FieldOps<BaseField>> {
     pub columns: [Col<B, BaseField>; SECURE_EXTENSION_DEGREE],
 }
 
-impl<B: FieldOps<BaseField>> Default for SecureColumnByCoords<B>
-where
-    <B as ColumnOps<M31>>::Column: std::marker::Copy, // TODO: ??
-{
-    fn default() -> Self {
-        Self {
-            columns: [Col::<B, BaseField>::default(); SECURE_EXTENSION_DEGREE],
-        }
-    }
-}
-
 impl SecureColumnByCoords<CpuBackend> {
-    // TODO(spapini): Remove when we no longer use CircleEvaluation<SecureField>.
+    // TODO(first): Remove.
     pub fn to_vec(&self) -> Vec<SecureField> {
         (0..self.len()).map(|i| self.at(i)).collect()
     }
@@ -110,13 +94,15 @@ impl<'a> IntoIterator for &'a SecureColumnByCoords<CpuBackend> {
 }
 impl FromIterator<SecureField> for SecureColumnByCoords<CpuBackend> {
     fn from_iter<I: IntoIterator<Item = SecureField>>(iter: I) -> Self {
-        let mut columns = std::array::from_fn(|_| vec![]);
-        for value in iter.into_iter() {
-            let vals = value.to_m31_array();
-            for j in 0..SECURE_EXTENSION_DEGREE {
-                columns[j].push(vals[j]);
-            }
+        let values = iter.into_iter();
+        let (lower_bound, _) = values.size_hint();
+        let mut columns = array::from_fn(|_| Vec::with_capacity(lower_bound));
+
+        for value in values {
+            let coords = value.to_m31_array();
+            zip(&mut columns, coords).for_each(|(col, coord)| col.push(coord));
         }
+
         SecureColumnByCoords { columns }
     }
 }
@@ -128,11 +114,8 @@ impl From<SecureColumnByCoords<CpuBackend>> for Vec<SecureField> {
 
 #[cfg(feature = "icicle_poc")]
 mod icicle_poc {
-    use std::ffi::c_void;
     use std::mem::{transmute, ManuallyDrop};
-    use std::ptr::{
-        self, null_mut, slice_from_raw_parts, slice_from_raw_parts_mut,
-    };
+    use std::ptr::{self, slice_from_raw_parts, slice_from_raw_parts_mut};
 
     use icicle_core::ntt::FieldImpl;
     use icicle_core::vec_ops::{accumulate_scalars, stwo_convert, transpose_matrix, VecOpsConfig};
@@ -150,14 +133,14 @@ mod icicle_poc {
     use crate::core::fields::FieldOps;
 
     impl SecureColumnByCoords<CpuBackend> {
-        pub fn convert_to_icicle(input: &Self, d_output: &mut DeviceSlice::<ExtensionField>) {
+        pub fn convert_to_icicle(input: &Self, d_output: &mut DeviceSlice<ExtensionField>) {
             let zero = ScalarField::zero();
 
             let n = input.columns[0].len();
             let secure_degree = input.columns.len();
             let mut intermediate_host = vec![zero; secure_degree * n];
 
-            use crate::core::SecureField;
+            use crate::core::fields::secure_column::SecureField;
             let cfg = VecOpsConfig::default();
 
             let a: &[u32] = unsafe { transmute(input.columns[0].as_slice()) };
@@ -173,14 +156,14 @@ mod icicle_poc {
             stwo_convert(a, b, c, d, d_output);
         }
 
-        pub fn convert_from_icicle(input: &mut Self, d_input: &mut DeviceSlice::<ScalarField>) {
+        pub fn convert_from_icicle(input: &mut Self, d_input: &mut DeviceSlice<ScalarField>) {
             let zero = ScalarField::zero();
 
             let n = input.columns[0].len();
             let secure_degree = input.columns.len();
             let mut intermediate_host = vec![zero; secure_degree * n];
 
-            use crate::core::SecureField;
+            use crate::core::fields::secure_column::SecureField;
             let cfg = VecOpsConfig::default();
 
             let mut result_tr: DeviceVec<ScalarField> =

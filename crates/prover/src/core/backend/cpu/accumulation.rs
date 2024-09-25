@@ -1,8 +1,6 @@
 use std::mem::size_of_val;
 use std::os::raw::c_void;
 
-use icicle_cuda_runtime::memory::{DeviceVec, HostOrDeviceSlice};
-
 use super::CpuBackend;
 use crate::core::air::accumulation::AccumulationOps;
 use crate::core::fields::secure_column::SecureColumnByCoords;
@@ -18,6 +16,7 @@ impl AccumulationOps for CpuBackend {
         #[cfg(feature = "icicle_poc")]
         {
             use icicle_core::vec_ops::{accumulate_scalars, VecOpsConfig};
+            use icicle_cuda_runtime::memory::{DeviceVec, HostOrDeviceSlice};
 
             let cfg = VecOpsConfig::default();
 

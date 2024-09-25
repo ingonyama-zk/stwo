@@ -1,7 +1,8 @@
-use itertools::Itertools;
+use std::{array, mem};
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracing::{span, Level};
+use tracing::{info, instrument, span, Level};
 
 use super::air::{Component, ComponentProver, ComponentProvers, Components};
 use super::backend::BackendForChannel;
@@ -9,63 +10,42 @@ use super::channel::MerkleChannel;
 use super::fields::secure_column::SECURE_EXTENSION_DEGREE;
 use super::fri::FriVerificationError;
 use super::pcs::{CommitmentSchemeProof, TreeVec};
-use super::poly::circle::MAX_CIRCLE_DOMAIN_LOG_SIZE;
 use super::vcs::ops::MerkleHasher;
-use super::{ColumnVec, InteractionElements, LookupValues};
-use crate::core::backend::CpuBackend;
 use crate::core::channel::Channel;
 use crate::core::circle::CirclePoint;
+use crate::core::fields::m31::BaseField;
 use crate::core::fields::qm31::SecureField;
+use crate::core::fri::{FriLayerProof, FriProof};
 use crate::core::pcs::{CommitmentSchemeProver, CommitmentSchemeVerifier};
-use crate::core::poly::circle::CircleEvaluation;
-use crate::core::poly::BitReversedOrder;
+use crate::core::vcs::hash::Hash;
+use crate::core::vcs::prover::MerkleDecommitment;
 use crate::core::vcs::verifier::MerkleVerificationError;
-
-pub const LOG_BLOWUP_FACTOR: u32 = 1;
-pub const LOG_LAST_LAYER_DEGREE_BOUND: u32 = 0;
-pub const PROOF_OF_WORK_BITS: u32 = 12;
-pub const N_QUERIES: usize = 3;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct StarkProof<H: MerkleHasher> {
     pub commitments: TreeVec<H::Hash>,
-    pub lookup_values: LookupValues,
     pub commitment_scheme_proof: CommitmentSchemeProof<H>,
 }
 
-#[derive(Debug)]
-pub struct AdditionalProofData {
-    pub composition_polynomial_oods_value: SecureField,
-    pub composition_polynomial_random_coeff: SecureField,
-    pub oods_point: CirclePoint<SecureField>,
-    pub oods_quotients: Vec<CircleEvaluation<CpuBackend, SecureField, BitReversedOrder>>,
-}
-
+#[instrument(skip_all)]
 pub fn prove<B: BackendForChannel<MC>, MC: MerkleChannel>(
     components: &[&dyn ComponentProver<B>],
     channel: &mut MC::C,
-    interaction_elements: &InteractionElements,
     commitment_scheme: &mut CommitmentSchemeProver<'_, B, MC>,
 ) -> Result<StarkProof<MC::H>, ProvingError> {
     let component_provers = ComponentProvers(components.to_vec());
-    let component_traces = component_provers.component_traces(&commitment_scheme.trees);
-    let lookup_values = component_provers.lookup_values(&component_traces);
+    let trace = commitment_scheme.trace();
 
     // Evaluate and commit on composition polynomial.
     let random_coeff = channel.draw_felt();
 
     let span = span!(Level::INFO, "Composition").entered();
     let span1 = span!(Level::INFO, "Generation").entered();
-    let composition_polynomial_poly = component_provers.compute_composition_polynomial(
-        random_coeff,
-        &component_traces,
-        interaction_elements,
-        &lookup_values,
-    );
+    let composition_poly = component_provers.compute_composition_polynomial(random_coeff, &trace);
     span1.exit();
 
     let mut tree_builder = commitment_scheme.tree_builder();
-    tree_builder.extend_polys(composition_polynomial_poly.to_vec());
+    tree_builder.extend_polys(composition_poly.into_coordinate_polys());
     tree_builder.commit(channel);
     span.exit();
 
@@ -80,40 +60,30 @@ pub fn prove<B: BackendForChannel<MC>, MC: MerkleChannel>(
     // Prove the trace and composition OODS values, and retrieve them.
     let commitment_scheme_proof = commitment_scheme.prove_values(sample_points, channel);
 
+    let sampled_oods_values = &commitment_scheme_proof.sampled_values;
+    let composition_oods_eval = extract_composition_eval(sampled_oods_values).unwrap();
+
     // Evaluate composition polynomial at OODS point and check that it matches the trace OODS
     // values. This is a sanity check.
-    // TODO(spapini): Save clone.
-    let (trace_oods_values, composition_oods_value) = sampled_values_to_mask(
-        &component_provers.components(),
-        &commitment_scheme_proof.sampled_values,
-    )
-    .unwrap();
-
-    if composition_oods_value
+    if composition_oods_eval
         != component_provers
             .components()
-            .eval_composition_polynomial_at_point(
-                oods_point,
-                &trace_oods_values,
-                random_coeff,
-                interaction_elements,
-                &lookup_values,
-            )
+            .eval_composition_polynomial_at_point(oods_point, sampled_oods_values, random_coeff)
     {
         return Err(ProvingError::ConstraintsNotSatisfied);
     }
 
-    Ok(StarkProof {
+    let proof = StarkProof {
         commitments: commitment_scheme.roots(),
-        lookup_values,
         commitment_scheme_proof,
-    })
+    };
+    info!(proof_size_estimate = proof.size_estimate());
+    Ok(proof)
 }
 
 pub fn verify<MC: MerkleChannel>(
     components: &[&dyn Component],
     channel: &mut MC::C,
-    interaction_elements: &InteractionElements,
     commitment_scheme: &mut CommitmentSchemeVerifier<MC>,
     proof: StarkProof<MC::H>,
 ) -> Result<(), VerificationError> {
@@ -135,22 +105,16 @@ pub fn verify<MC: MerkleChannel>(
     // Add the composition polynomial mask points.
     sample_points.push(vec![vec![oods_point]; SECURE_EXTENSION_DEGREE]);
 
-    // TODO(spapini): Save clone.
-    let (trace_oods_values, composition_oods_value) =
-        sampled_values_to_mask(&components, &proof.commitment_scheme_proof.sampled_values)
-            .map_err(|_| {
-                VerificationError::InvalidStructure(
-                    "Unexpected sampled_values structure".to_string(),
-                )
-            })?;
+    let sampled_oods_values = &proof.commitment_scheme_proof.sampled_values;
+    let composition_oods_eval = extract_composition_eval(sampled_oods_values).map_err(|_| {
+        VerificationError::InvalidStructure("Unexpected sampled_values structure".to_string())
+    })?;
 
-    if composition_oods_value
+    if composition_oods_eval
         != components.eval_composition_polynomial_at_point(
             oods_point,
-            &trace_oods_values,
+            sampled_oods_values,
             random_coeff,
-            interaction_elements,
-            &proof.lookup_values,
         )
     {
         return Err(VerificationError::OodsNotMatching);
@@ -159,41 +123,24 @@ pub fn verify<MC: MerkleChannel>(
     commitment_scheme.verify_values(sample_points, proof.commitment_scheme_proof, channel)
 }
 
-#[allow(clippy::type_complexity)]
-/// Structures the tree-wise sampled values into component-wise OODS values and a composition
-/// polynomial OODS value.
-fn sampled_values_to_mask(
-    components: &Components<'_>,
-    sampled_values: &TreeVec<ColumnVec<Vec<SecureField>>>,
-) -> Result<(Vec<TreeVec<Vec<Vec<SecureField>>>>, SecureField), InvalidOodsSampleStructure> {
-    let mut sampled_values = sampled_values.as_ref();
-    let composition_values = sampled_values.pop().ok_or(InvalidOodsSampleStructure)?;
+/// Extracts the composition trace evaluation from the mask.
+fn extract_composition_eval(
+    mask: &TreeVec<Vec<Vec<SecureField>>>,
+) -> Result<SecureField, InvalidOodsSampleStructure> {
+    let mut composition_cols = mask.last().into_iter().flatten();
 
-    let mut sample_iters = sampled_values.map(|tree_value| tree_value.iter());
-    let trace_oods_values = components
-        .0
-        .iter()
-        .map(|component| {
-            component
-                .mask_points(CirclePoint::zero())
-                .zip(sample_iters.as_mut())
-                .map(|(mask_per_tree, tree_iter)| {
-                    tree_iter.take(mask_per_tree.len()).cloned().collect_vec()
-                })
-        })
-        .collect_vec();
+    let coordinate_evals = array::try_from_fn(|_| {
+        let col = &**composition_cols.next().ok_or(InvalidOodsSampleStructure)?;
+        let [eval] = col.try_into().map_err(|_| InvalidOodsSampleStructure)?;
+        Ok(eval)
+    })?;
 
-    let composition_oods_value = SecureField::from_partial_evals(
-        composition_values
-            .iter()
-            .flatten()
-            .cloned()
-            .collect_vec()
-            .try_into()
-            .map_err(|_| InvalidOodsSampleStructure)?,
-    );
+    // Too many columns.
+    if composition_cols.next().is_some() {
+        return Err(InvalidOodsSampleStructure);
+    }
 
-    Ok((trace_oods_values, composition_oods_value))
+    Ok(SecureField::from_partial_evals(coordinate_evals))
 }
 
 /// Error when the sampled values have an invalid structure.
@@ -202,16 +149,6 @@ pub struct InvalidOodsSampleStructure;
 
 #[derive(Clone, Copy, Debug, Error)]
 pub enum ProvingError {
-    #[error(
-        "Trace column {trace_index} log degree bound ({degree}) exceeded max log degree ({}).",
-        MAX_CIRCLE_DOMAIN_LOG_SIZE - LOG_BLOWUP_FACTOR
-    )]
-    MaxTraceDegreeExceeded { trace_index: usize, degree: u32 },
-    #[error(
-        "Composition polynomial log degree bound ({degree}) exceeded max log degree ({}).",
-        MAX_CIRCLE_DOMAIN_LOG_SIZE - LOG_BLOWUP_FACTOR
-    )]
-    MaxCompositionDegreeExceeded { degree: u32 },
     #[error("Constraints not satisfied.")]
     ConstraintsNotSatisfied,
 }
@@ -233,4 +170,177 @@ pub enum VerificationError {
     Fri(#[from] FriVerificationError),
     #[error("Proof of work verification failed.")]
     ProofOfWork,
+}
+
+impl<H: MerkleHasher> StarkProof<H> {
+    /// Returns the estimate size (in bytes) of the proof.
+    pub fn size_estimate(&self) -> usize {
+        SizeEstimate::size_estimate(self)
+    }
+
+    /// Returns size estimates (in bytes) for different parts of the proof.
+    pub fn size_breakdown_estimate(&self) -> StarkProofSizeBreakdown {
+        let Self {
+            commitments,
+            commitment_scheme_proof,
+        } = self;
+
+        let CommitmentSchemeProof {
+            sampled_values,
+            decommitments,
+            queried_values,
+            proof_of_work: _,
+            fri_proof,
+        } = commitment_scheme_proof;
+
+        let FriProof {
+            inner_layers,
+            last_layer_poly,
+        } = fri_proof;
+
+        let mut inner_layers_samples_size = 0;
+        let mut inner_layers_hashes_size = 0;
+
+        for FriLayerProof {
+            evals_subset,
+            decommitment,
+            commitment,
+        } in inner_layers
+        {
+            inner_layers_samples_size += evals_subset.size_estimate();
+            inner_layers_hashes_size += decommitment.size_estimate() + commitment.size_estimate();
+        }
+
+        StarkProofSizeBreakdown {
+            oods_samples: sampled_values.size_estimate(),
+            queries_values: queried_values.size_estimate(),
+            fri_samples: last_layer_poly.size_estimate() + inner_layers_samples_size,
+            fri_decommitments: inner_layers_hashes_size,
+            trace_decommitments: commitments.size_estimate() + decommitments.size_estimate(),
+        }
+    }
+}
+
+/// Size estimate (in bytes) for different parts of the proof.
+pub struct StarkProofSizeBreakdown {
+    pub oods_samples: usize,
+    pub queries_values: usize,
+    pub fri_samples: usize,
+    pub fri_decommitments: usize,
+    pub trace_decommitments: usize,
+}
+
+trait SizeEstimate {
+    fn size_estimate(&self) -> usize;
+}
+
+impl<T: SizeEstimate> SizeEstimate for [T] {
+    fn size_estimate(&self) -> usize {
+        self.iter().map(|v| v.size_estimate()).sum()
+    }
+}
+
+impl<T: SizeEstimate> SizeEstimate for Vec<T> {
+    fn size_estimate(&self) -> usize {
+        self.iter().map(|v| v.size_estimate()).sum()
+    }
+}
+
+impl<H: Hash> SizeEstimate for H {
+    fn size_estimate(&self) -> usize {
+        mem::size_of::<Self>()
+    }
+}
+
+impl SizeEstimate for BaseField {
+    fn size_estimate(&self) -> usize {
+        mem::size_of::<Self>()
+    }
+}
+
+impl SizeEstimate for SecureField {
+    fn size_estimate(&self) -> usize {
+        mem::size_of::<Self>()
+    }
+}
+
+impl<H: MerkleHasher> SizeEstimate for MerkleDecommitment<H> {
+    fn size_estimate(&self) -> usize {
+        let Self {
+            hash_witness,
+            column_witness,
+        } = self;
+        hash_witness.size_estimate() + column_witness.size_estimate()
+    }
+}
+
+impl<H: MerkleHasher> SizeEstimate for FriLayerProof<H> {
+    fn size_estimate(&self) -> usize {
+        let Self {
+            evals_subset,
+            decommitment,
+            commitment,
+        } = self;
+        evals_subset.size_estimate() + decommitment.size_estimate() + commitment.size_estimate()
+    }
+}
+
+impl<H: MerkleHasher> SizeEstimate for FriProof<H> {
+    fn size_estimate(&self) -> usize {
+        let Self {
+            inner_layers,
+            last_layer_poly,
+        } = self;
+        inner_layers.size_estimate() + last_layer_poly.size_estimate()
+    }
+}
+
+impl<H: MerkleHasher> SizeEstimate for CommitmentSchemeProof<H> {
+    fn size_estimate(&self) -> usize {
+        let Self {
+            sampled_values,
+            decommitments,
+            queried_values,
+            proof_of_work,
+            fri_proof,
+        } = self;
+        sampled_values.size_estimate()
+            + decommitments.size_estimate()
+            + queried_values.size_estimate()
+            + mem::size_of_val(proof_of_work)
+            + fri_proof.size_estimate()
+    }
+}
+
+impl<H: MerkleHasher> SizeEstimate for StarkProof<H> {
+    fn size_estimate(&self) -> usize {
+        let Self {
+            commitments,
+            commitment_scheme_proof,
+        } = self;
+        commitments.size_estimate() + commitment_scheme_proof.size_estimate()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use num_traits::One;
+
+    use crate::core::fields::m31::BaseField;
+    use crate::core::fields::qm31::SecureField;
+    use crate::core::fields::secure_column::SECURE_EXTENSION_DEGREE;
+    use crate::core::prover::SizeEstimate;
+
+    #[test]
+    fn test_base_field_size_estimate() {
+        assert_eq!(BaseField::one().size_estimate(), 4);
+    }
+
+    #[test]
+    fn test_secure_field_size_estimate() {
+        assert_eq!(
+            SecureField::one().size_estimate(),
+            4 * SECURE_EXTENSION_DEGREE
+        );
+    }
 }

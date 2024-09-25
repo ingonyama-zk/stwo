@@ -8,6 +8,7 @@ use super::fields::m31::BaseField;
 use super::fields::qm31::SecureField;
 use super::fields::FieldOps;
 use super::fri::FriOps;
+use super::lookups::gkr_prover::GkrOps;
 use super::pcs::quotients::QuotientOps;
 use super::poly::circle::PolyOps;
 use super::proof_of_work::GrindOps;
@@ -26,6 +27,7 @@ pub trait Backend:
     + QuotientOps
     + FriOps
     + AccumulationOps
+    + GkrOps
 {
 }
 
@@ -41,8 +43,8 @@ pub trait ColumnOps<T> {
 
 pub type Col<B, T> = <B as ColumnOps<T>>::Column;
 
-// TODO(spapini): Consider removing the generic parameter and only support BaseField.
-pub trait Column<T>: Clone + Debug + FromIterator<T> + Default {
+// TODO(alont): Consider removing the generic parameter and only support BaseField.
+pub trait Column<T>: Clone + Debug + FromIterator<T> {
     /// Creates a new column of zeros with the given length.
     fn zeros(len: usize) -> Self;
     /// Creates a new column of uninitialized values with the given length.

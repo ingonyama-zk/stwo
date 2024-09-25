@@ -1,9 +1,14 @@
-use itertools::{chain, Itertools};
+use itertools::Itertools;
 use num_traits::One;
 use tracing::{span, Level};
 
-use crate::constraint_framework::logup::{LogupAtRow, LogupTraceGenerator, LookupElements};
-use crate::constraint_framework::{assert_constraints, EvalAtRow, FrameworkComponent};
+use crate::constraint_framework::constant_columns::gen_is_first;
+use crate::constraint_framework::logup::{
+    ClaimedPrefixSum, LogupAtRow, LogupTraceGenerator, LookupElements,
+};
+use crate::constraint_framework::{
+    assert_constraints, EvalAtRow, FrameworkComponent, FrameworkEval, TraceLocationAllocator,
+};
 use crate::core::backend::simd::column::BaseColumn;
 use crate::core::backend::simd::m31::LOG_N_LANES;
 use crate::core::backend::simd::qm31::PackedSecureField;
@@ -12,21 +17,28 @@ use crate::core::backend::Column;
 use crate::core::channel::Blake2sChannel;
 use crate::core::fields::m31::BaseField;
 use crate::core::fields::qm31::SecureField;
-use crate::core::pcs::CommitmentSchemeProver;
+use crate::core::lookups::utils::Fraction;
+use crate::core::pcs::{CommitmentSchemeProver, PcsConfig, TreeSubspan};
 use crate::core::poly::circle::{CanonicCoset, CircleEvaluation, PolyOps};
 use crate::core::poly::BitReversedOrder;
-use crate::core::prover::{prove, StarkProof, LOG_BLOWUP_FACTOR};
-use crate::core::vcs::blake2_merkle::Blake2sMerkleHasher;
-use crate::core::{ColumnVec, InteractionElements};
+use crate::core::prover::{prove, StarkProof};
+use crate::core::vcs::blake2_merkle::{Blake2sMerkleChannel, Blake2sMerkleHasher};
+use crate::core::ColumnVec;
+
+pub type PlonkComponent = FrameworkComponent<PlonkEval>;
 
 #[derive(Clone)]
-pub struct PlonkComponent {
+pub struct PlonkEval {
     pub log_n_rows: u32,
     pub lookup_elements: LookupElements<2>,
-    pub claimed_sum: SecureField,
+    pub claimed_sum: ClaimedPrefixSum,
+    pub total_sum: SecureField,
+    pub base_trace_location: TreeSubspan,
+    pub interaction_trace_location: TreeSubspan,
+    pub constants_trace_location: TreeSubspan,
 }
 
-impl FrameworkComponent for PlonkComponent {
+impl FrameworkEval for PlonkEval {
     fn log_size(&self) -> u32 {
         self.log_n_rows
     }
@@ -36,7 +48,8 @@ impl FrameworkComponent for PlonkComponent {
     }
 
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let mut logup = LogupAtRow::<2, _>::new(1, self.claimed_sum, self.log_n_rows);
+        let [is_first] = eval.next_interaction_mask(2, [0]);
+        let mut logup = LogupAtRow::<_>::new(1, self.total_sum, Some(self.claimed_sum), is_first);
 
         let [a_wire] = eval.next_interaction_mask(2, [0]);
         let [b_wire] = eval.next_interaction_mask(2, [0]);
@@ -52,23 +65,19 @@ impl FrameworkComponent for PlonkComponent {
 
         eval.add_constraint(c_val - op * (a_val + b_val) + (E::F::one() - op) * a_val * b_val);
 
-        logup.push_lookup(
+        let denom_a: E::EF = self.lookup_elements.combine(&[a_wire, a_val]);
+        let denom_b: E::EF = self.lookup_elements.combine(&[b_wire, b_val]);
+
+        logup.write_frac(
             &mut eval,
-            E::EF::one(),
-            &[a_wire, a_val],
-            &self.lookup_elements,
+            Fraction::new(denom_a + denom_b, denom_a * denom_b),
         );
-        logup.push_lookup(
+        logup.write_frac(
             &mut eval,
-            E::EF::one(),
-            &[b_wire, b_val],
-            &self.lookup_elements,
-        );
-        logup.push_lookup(
-            &mut eval,
-            E::EF::from(-mult),
-            &[c_wire, c_val],
-            &self.lookup_elements,
+            Fraction::new(
+                (-mult).into(),
+                self.lookup_elements.combine(&[c_wire, c_val]),
+            ),
         );
 
         logup.finalize(&mut eval);
@@ -101,17 +110,18 @@ pub fn gen_trace(
         &circuit.c_val,
     ]
     .into_iter()
-    .map(|eval| CircleEvaluation::<SimdBackend, _, BitReversedOrder>::new(domain, eval.clone()))
-    .collect_vec()
+    .map(|eval| CircleEvaluation::new(domain, eval.clone()))
+    .collect()
 }
 
 pub fn gen_interaction_trace(
     log_size: u32,
+    padding_offset: usize,
     circuit: &PlonkCircuitTrace,
     lookup_elements: &LookupElements<2>,
 ) -> (
     ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
-    SecureField,
+    [SecureField; 2],
 ) {
     let _span = span!(Level::INFO, "Generate interaction trace").entered();
     let mut logup_gen = LogupTraceGenerator::new(log_size);
@@ -135,11 +145,14 @@ pub fn gen_interaction_trace(
     }
     col_gen.finalize_col();
 
-    logup_gen.finalize()
+    logup_gen.finalize_at([(1 << log_size) - 1, padding_offset])
 }
 
 #[allow(unused)]
-pub fn prove_fibonacci_plonk(log_n_rows: u32) -> (PlonkComponent, StarkProof<Blake2sMerkleHasher>) {
+pub fn prove_fibonacci_plonk(
+    log_n_rows: u32,
+    config: PcsConfig,
+) -> (PlonkComponent, StarkProof<Blake2sMerkleHasher>) {
     assert!(log_n_rows >= LOG_N_LANES);
 
     // Prepare a fibonacci circuit.
@@ -147,6 +160,7 @@ pub fn prove_fibonacci_plonk(log_n_rows: u32) -> (PlonkComponent, StarkProof<Bla
     for _ in 0..(1 << log_n_rows) {
         fib_values.push(fib_values[fib_values.len() - 1] + fib_values[fib_values.len() - 2]);
     }
+    let padding_offset = 17;
     let range = 0..(1 << log_n_rows);
     let mut circuit = PlonkCircuitTrace {
         mult: range.clone().map(|_| 2.into()).collect(),
@@ -164,7 +178,7 @@ pub fn prove_fibonacci_plonk(log_n_rows: u32) -> (PlonkComponent, StarkProof<Bla
     // Precompute twiddles.
     let span = span!(Level::INFO, "Precompute twiddles").entered();
     let twiddles = SimdBackend::precompute_twiddles(
-        CanonicCoset::new(log_n_rows + LOG_BLOWUP_FACTOR + 1)
+        CanonicCoset::new(log_n_rows + config.fri_config.log_blowup_factor + 1)
             .circle_domain()
             .half_coset,
     );
@@ -172,13 +186,14 @@ pub fn prove_fibonacci_plonk(log_n_rows: u32) -> (PlonkComponent, StarkProof<Bla
 
     // Setup protocol.
     let channel = &mut Blake2sChannel::default();
-    let commitment_scheme = &mut CommitmentSchemeProver::new(LOG_BLOWUP_FACTOR, &twiddles);
+    let commitment_scheme =
+        &mut CommitmentSchemeProver::<_, Blake2sMerkleChannel>::new(config, &twiddles);
 
     // Trace.
     let span = span!(Level::INFO, "Trace").entered();
     let trace = gen_trace(log_n_rows, &circuit);
     let mut tree_builder = commitment_scheme.tree_builder();
-    tree_builder.extend_evals(trace);
+    let base_trace_location = tree_builder.extend_evals(trace);
     tree_builder.commit(channel);
     span.exit();
 
@@ -187,35 +202,44 @@ pub fn prove_fibonacci_plonk(log_n_rows: u32) -> (PlonkComponent, StarkProof<Bla
 
     // Interaction trace.
     let span = span!(Level::INFO, "Interaction").entered();
-    let (trace, claimed_sum) = gen_interaction_trace(log_n_rows, &circuit, &lookup_elements);
+    let (trace, [total_sum, claimed_sum]) =
+        gen_interaction_trace(log_n_rows, padding_offset, &circuit, &lookup_elements);
     let mut tree_builder = commitment_scheme.tree_builder();
-    tree_builder.extend_evals(trace);
+    let interaction_trace_location = tree_builder.extend_evals(trace);
     tree_builder.commit(channel);
     span.exit();
 
     // Constant trace.
     let span = span!(Level::INFO, "Constant").entered();
     let mut tree_builder = commitment_scheme.tree_builder();
-    tree_builder.extend_evals(
-        chain!([circuit.a_wire, circuit.b_wire, circuit.c_wire, circuit.op]
-            .into_iter()
-            .map(|col| {
-                CircleEvaluation::<SimdBackend, _, BitReversedOrder>::new(
-                    CanonicCoset::new(log_n_rows).circle_domain(),
-                    col,
-                )
-            }))
-        .collect_vec(),
-    );
+    let is_first = gen_is_first(log_n_rows);
+    let mut constant_trace = [circuit.a_wire, circuit.b_wire, circuit.c_wire, circuit.op]
+        .into_iter()
+        .map(|col| {
+            CircleEvaluation::<SimdBackend, _, BitReversedOrder>::new(
+                CanonicCoset::new(log_n_rows).circle_domain(),
+                col,
+            )
+        })
+        .collect_vec();
+    constant_trace.insert(0, is_first);
+    let constants_trace_location = tree_builder.extend_evals(constant_trace);
     tree_builder.commit(channel);
     span.exit();
 
     // Prove constraints.
-    let component = PlonkComponent {
-        log_n_rows,
-        lookup_elements,
-        claimed_sum,
-    };
+    let component = PlonkComponent::new(
+        &mut TraceLocationAllocator::default(),
+        PlonkEval {
+            log_n_rows,
+            lookup_elements,
+            claimed_sum: (claimed_sum, padding_offset),
+            total_sum,
+            base_trace_location,
+            interaction_trace_location,
+            constants_trace_location,
+        },
+    );
 
     // Sanity check. Remove for production.
     let trace_polys = commitment_scheme
@@ -226,13 +250,7 @@ pub fn prove_fibonacci_plonk(log_n_rows: u32) -> (PlonkComponent, StarkProof<Bla
         component.evaluate(eval);
     });
 
-    let proof = prove::<SimdBackend, _>(
-        &[&component],
-        channel,
-        &InteractionElements::default(),
-        commitment_scheme,
-    )
-    .unwrap();
+    let proof = prove(&[&component], channel, commitment_scheme).unwrap();
 
     (component, proof)
 }
@@ -244,10 +262,10 @@ mod tests {
     use crate::constraint_framework::logup::LookupElements;
     use crate::core::air::Component;
     use crate::core::channel::Blake2sChannel;
-    use crate::core::pcs::CommitmentSchemeVerifier;
+    use crate::core::fri::FriConfig;
+    use crate::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
     use crate::core::prover::verify;
     use crate::core::vcs::blake2_merkle::Blake2sMerkleChannel;
-    use crate::core::InteractionElements;
     use crate::examples::plonk::prove_fibonacci_plonk;
 
     #[test_log::test]
@@ -257,14 +275,18 @@ mod tests {
             .unwrap_or_else(|_| "10".to_string())
             .parse::<u32>()
             .unwrap();
+        let config = PcsConfig {
+            pow_bits: 10,
+            fri_config: FriConfig::new(5, 4, 64),
+        };
 
         // Prove.
-        let (component, proof) = prove_fibonacci_plonk(log_n_instances);
+        let (component, proof) = prove_fibonacci_plonk(log_n_instances, config);
 
         // Verify.
         // TODO: Create Air instance independently.
         let channel = &mut Blake2sChannel::default();
-        let commitment_scheme = &mut CommitmentSchemeVerifier::<Blake2sMerkleChannel>::new();
+        let commitment_scheme = &mut CommitmentSchemeVerifier::<Blake2sMerkleChannel>::new(config);
 
         // Decommit.
         // Retrieve the expected column sizes in each commitment interaction, from the AIR.
@@ -274,19 +296,11 @@ mod tests {
         // Draw lookup element.
         let lookup_elements = LookupElements::<2>::draw(channel);
         assert_eq!(lookup_elements, component.lookup_elements);
-        // TODO(spapini): Check claimed sum against first and last instances.
         // Interaction columns.
         commitment_scheme.commit(proof.commitments[1], &sizes[1], channel);
         // Constant columns.
         commitment_scheme.commit(proof.commitments[2], &sizes[2], channel);
 
-        verify(
-            &[&component],
-            channel,
-            &InteractionElements::default(),
-            commitment_scheme,
-            proof,
-        )
-        .unwrap();
+        verify(&[&component], channel, commitment_scheme, proof).unwrap();
     }
 }

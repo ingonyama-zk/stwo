@@ -1,9 +1,11 @@
 mod accumulation;
 mod blake2s;
-mod circle;
+pub mod circle;
 mod fri;
 mod grind;
 pub mod lookups;
+#[cfg(not(target_arch = "wasm32"))]
+mod poseidon252;
 pub mod quotients;
 
 use std::fmt::Debug;

@@ -22,7 +22,6 @@ use super::poly::twiddles::TwiddleTree;
 use super::poly::BitReversedOrder;
 // TODO(andrew): Create fri/ directory, move queries.rs there and split this file up.
 use super::queries::{Queries, SparseSubCircleDomain};
-use crate::core::air::accumulation::PointEvaluationAccumulator;
 use crate::core::circle::Coset;
 use crate::core::fft::ibutterfly;
 use crate::core::fields::FieldExpOps;
@@ -36,9 +35,9 @@ use crate::core::vcs::verifier::{MerkleVerificationError, MerkleVerifier};
 // TODO(andrew): Support different step sizes.
 #[derive(Debug, Clone, Copy)]
 pub struct FriConfig {
-    log_blowup_factor: u32,
-    log_last_layer_degree_bound: u32,
-    n_queries: usize,
+    pub log_blowup_factor: u32,
+    pub log_last_layer_degree_bound: u32,
+    pub n_queries: usize,
     // TODO(andrew): fold_steps.
 }
 
@@ -110,7 +109,7 @@ pub trait FriOps: FieldOps<BaseField> + PolyOps + Sized + FieldOps<SecureField> 
     // TODO(andrew): Fold directly into FRI layer to prevent allocation.
     fn fold_circle_into_line(
         dst: &mut LineEvaluation<Self>,
-        src: &SecureEvaluation<Self>,
+        src: &SecureEvaluation<Self, BitReversedOrder>,
         alpha: SecureField,
         twiddles: &TwiddleTree<Self>,
     );
@@ -120,7 +119,9 @@ pub trait FriOps: FieldOps<BaseField> + PolyOps + Sized + FieldOps<SecureField> 
     /// FRI-space: polynomials of total degree n/2.
     /// Based on lemma #12 from the CircleStark paper: f(P) = g(P)+ lambda * alternating(P),
     /// where lambda is the cosset diff of eval, and g is a polynomial in the fft-space.
-    fn decompose(eval: &SecureEvaluation<Self>) -> (SecureEvaluation<Self>, SecureField);
+    fn decompose(
+        eval: &SecureEvaluation<Self, BitReversedOrder>,
+    ) -> (SecureEvaluation<Self, BitReversedOrder>, SecureField);
 }
 /// A FRI prover that applies the FRI protocol to prove a set of polynomials are of low degree.
 pub struct FriProver<B: FriOps + MerkleOps<MC::H>, MC: MerkleChannel> {
@@ -155,7 +156,7 @@ impl<B: FriOps + MerkleOps<MC::H>, MC: MerkleChannel> FriProver<B, MC> {
     pub fn commit(
         channel: &mut MC::C,
         config: FriConfig,
-        columns: &[SecureEvaluation<B>],
+        columns: &[SecureEvaluation<B, BitReversedOrder>],
         twiddles: &TwiddleTree<B>,
     ) -> Self {
         let _span = span!(Level::INFO, "FRI commitment").entered();
@@ -187,11 +188,12 @@ impl<B: FriOps + MerkleOps<MC::H>, MC: MerkleChannel> FriProver<B, MC> {
     fn commit_inner_layers(
         channel: &mut MC::C,
         config: FriConfig,
-        columns: &[SecureEvaluation<B>],
+        columns: &[SecureEvaluation<B, BitReversedOrder>],
         twiddles: &TwiddleTree<B>,
     ) -> (Vec<FriLayerProver<B, MC::H>>, LineEvaluation<B>) {
         // Returns the length of the [LineEvaluation] a [CircleEvaluation] gets folded into.
-        let folded_len = |e: &SecureEvaluation<B>| e.len() >> CIRCLE_TO_LINE_FOLD_STEP;
+        let folded_len =
+            |e: &SecureEvaluation<B, BitReversedOrder>| e.len() >> CIRCLE_TO_LINE_FOLD_STEP;
 
         let first_layer_size = folded_len(&columns[0]);
         let first_layer_domain = LineDomain::new(Coset::half_odds(first_layer_size.ilog2()));
@@ -205,27 +207,18 @@ impl<B: FriOps + MerkleOps<MC::H>, MC: MerkleChannel> FriProver<B, MC> {
         let circle_poly_alpha = channel.draw_felt();
 
         while layer_evaluation.len() > config.last_layer_domain_size() {
-            let mut layer_lambda_acc = PointEvaluationAccumulator::new(circle_poly_alpha.square());
-
-            // The following steps are blowup factor 2 specific.
-            // TODO(Ohad/ShaharS/ShaharP): support larger blowup.
-            assert_eq!(
-                config.log_blowup_factor, 1,
-                "only log blowup factor 2 is supported"
-            );
-
-            // Check for any columns (circle poly evaluations) that should be combined. If there are
-            // multiple, combine them into a single column.
+            // Check for any columns (circle poly evaluations) that should be combined.
             while let Some(column) = columns.next_if(|c| folded_len(c) == layer_evaluation.len()) {
-                let (g, lambda) = B::decompose(column);
-                layer_lambda_acc.accumulate(lambda);
-                B::fold_circle_into_line(&mut layer_evaluation, &g, circle_poly_alpha, twiddles);
+                B::fold_circle_into_line(
+                    &mut layer_evaluation,
+                    column,
+                    circle_poly_alpha,
+                    twiddles,
+                );
             }
 
-            let layer_lambda = layer_lambda_acc.finalize();
-            let layer = FriLayerProver::new(layer_evaluation, layer_lambda);
+            let layer = FriLayerProver::new(layer_evaluation);
             MC::mix_root(channel, layer.merkle_tree.root());
-            channel.mix_felts(&[layer_lambda]);
             let folding_alpha = channel.draw_felt();
             let folded_layer_evaluation = B::fold_line(&layer.evaluation, folding_alpha, twiddles);
 
@@ -366,10 +359,6 @@ impl<MC: MerkleChannel> FriVerifier<MC> {
         for (layer_index, proof) in proof.inner_layers.into_iter().enumerate() {
             MC::mix_root(channel, proof.commitment);
 
-            // The merkle verification, combined with the decomposition being unique, asserts the
-            // decomposition correctness.
-            channel.mix_felts(&[proof.decomposition_coeff]);
-
             let folding_alpha = channel.draw_felt();
 
             inner_layers.push(FriLayerVerifier {
@@ -461,34 +450,17 @@ impl<MC: MerkleChannel> FriVerifier<MC> {
         let mut layer_query_evals = vec![SecureField::zero(); layer_queries.len()];
 
         for layer in self.inner_layers.iter() {
-            if column_bounds
+            // Check for column evals that need to folded into this layer.
+            while column_bounds
                 .next_if(|b| b.fold_to_line() == layer.degree_bound)
                 .is_some()
             {
-                let mut n_columns_in_layer = 1;
-                let mut combined_sparse_evals = decommitted_values.next().unwrap();
-
-                // Check for more columns that were folded into the current layer.
-                while column_bounds
-                    .next_if(|b| b.fold_to_line() == layer.degree_bound)
-                    .is_some()
-                {
-                    combined_sparse_evals
-                        .accumulate(decommitted_values.next().unwrap(), circle_poly_alpha_sq);
-                    n_columns_in_layer += 1;
-                }
-
-                Self::project_to_fft_space(
-                    &layer_queries,
-                    &mut combined_sparse_evals,
-                    layer.proof.decomposition_coeff,
-                );
-
-                let folded_evals = combined_sparse_evals.fold(circle_poly_alpha);
-                let prev_layer_combination_factor = circle_poly_alpha_sq.pow(n_columns_in_layer);
+                let sparse_evaluation = decommitted_values.next().unwrap();
+                let folded_evals = sparse_evaluation.fold(circle_poly_alpha);
                 assert_eq!(folded_evals.len(), layer_query_evals.len());
+
                 for (layer_eval, folded_eval) in zip(&mut layer_query_evals, folded_evals) {
-                    *layer_eval = *layer_eval * prev_layer_combination_factor + folded_eval;
+                    *layer_eval = *layer_eval * circle_poly_alpha_sq + folded_eval;
                 }
             }
 
@@ -501,27 +473,6 @@ impl<MC: MerkleChannel> FriVerifier<MC> {
         assert!(decommitted_values.is_empty());
 
         Ok((layer_queries, layer_query_evals))
-    }
-
-    /// Projects a polynomial to the fft space using the coefficient from the proof.
-    /// See [`CpuBackend::decompose`] for explanation about the decomposition.
-    /// NOTE: specific to when Blowup factor is 2.
-    // TODO(Ohad): generalize this.
-    fn project_to_fft_space(
-        layer_queries: &Queries,
-        evals: &mut SparseCircleEvaluation,
-        lambda: SecureField,
-    ) {
-        let domain_size = 1 << layer_queries.log_domain_size;
-        layer_queries
-            .iter()
-            .zip(evals.subcircle_evals.iter_mut())
-            .for_each(|(&q, e)| {
-                let lambda = if q < domain_size / 2 { lambda } else { -lambda };
-                for v in e.values.iter_mut() {
-                    *v -= lambda;
-                }
-            });
     }
 
     /// Verifies the last layer.
@@ -588,21 +539,6 @@ fn get_opening_positions(
         prev_queries = queries;
     }
     positions
-}
-
-pub trait FriChannel {
-    type Digest;
-
-    type Field;
-
-    /// Reseeds the channel with a commitment to an inner FRI layer.
-    fn reseed_with_inner_layer(&mut self, commitment: &Self::Digest);
-
-    /// Reseeds the channel with the FRI last layer polynomial.
-    fn reseed_with_last_layer(&mut self, last_layer: &LinePoly);
-
-    /// Draws a random field element.
-    fn draw(&mut self) -> Self::Field;
 }
 
 #[derive(Clone, Copy, Debug, Error)]
@@ -693,7 +629,6 @@ pub struct FriLayerProof<H: MerkleHasher> {
     /// to fold and verify the merkle decommitment.
     pub evals_subset: Vec<SecureField>,
     pub decommitment: MerkleDecommitment<H>,
-    pub decomposition_coeff: SecureField,
     pub commitment: H::Hash,
 }
 
@@ -751,7 +686,6 @@ impl<H: MerkleHasher> FriLayerVerifier<H> {
             commitment,
             vec![self.domain.log_size(); SECURE_EXTENSION_DEGREE],
         );
-        // TODO(spapini): Propagate error.
         merkle_verifier
             .verify(
                 [(self.domain.log_size(), decommitment_positions)]
@@ -844,19 +778,15 @@ impl<H: MerkleHasher> FriLayerVerifier<H> {
 // TODO(andrew): Support different step sizes.
 struct FriLayerProver<B: FriOps + MerkleOps<H>, H: MerkleHasher> {
     evaluation: LineEvaluation<B>,
-    decomposition_coeff: SecureField,
     merkle_tree: MerkleProver<B, H>,
 }
 
 impl<B: FriOps + MerkleOps<H>, H: MerkleHasher> FriLayerProver<B, H> {
-    fn new(evaluation: LineEvaluation<B>, decomposition_coeff: SecureField) -> Self {
-        // TODO(spapini): Commit on slice.
-        // TODO(spapini): Merkle tree in backend.
+    fn new(evaluation: LineEvaluation<B>) -> Self {
         let merkle_tree = MerkleProver::commit(evaluation.values.columns.iter().collect_vec());
         #[allow(unreachable_code)]
         FriLayerProver {
             evaluation,
-            decomposition_coeff,
             merkle_tree,
         }
     }
@@ -889,19 +819,17 @@ impl<B: FriOps + MerkleOps<H>, H: MerkleHasher> FriLayerProver<B, H> {
         }
 
         let commitment = self.merkle_tree.root();
-        // TODO(spapini): Use _evals.
+        // TODO(andrew): Use _evals.
         let (_evals, decommitment) = self.merkle_tree.decommit(
             [(self.evaluation.len().ilog2(), decommit_positions)]
                 .into_iter()
                 .collect(),
             self.evaluation.values.columns.iter().collect_vec(),
         );
-        let decomposition_coeff = self.decomposition_coeff;
 
         FriLayerProof {
             evals_subset,
             decommitment,
-            decomposition_coeff,
             commitment,
         }
     }
@@ -933,26 +861,12 @@ impl SparseCircleEvaluation {
                 let mut buffer = LineEvaluation::new_zero(buffer_domain);
                 fold_circle_into_line(
                     &mut buffer,
-                    &SecureEvaluation {
-                        domain: e.domain,
-                        values: e.values.into_iter().collect(),
-                    },
+                    &SecureEvaluation::new(e.domain, e.values.into_iter().collect()),
                     alpha,
                 );
                 buffer.values.at(0)
             })
             .collect()
-    }
-
-    /// Computes `self = self * alpha + rhs`.
-    fn accumulate(&mut self, rhs: Self, alpha: SecureField) {
-        assert_eq!(self.subcircle_evals.len(), rhs.subcircle_evals.len());
-        for (lhs, rhs) in self.subcircle_evals.iter_mut().zip(rhs.subcircle_evals) {
-            assert_eq!(lhs.len(), rhs.len());
-            for (lhs, rhs) in lhs.values.iter_mut().zip(rhs.values) {
-                *lhs = *lhs * alpha + rhs;
-            }
-        }
     }
 }
 
@@ -1025,7 +939,7 @@ pub fn fold_line(
 /// See [`FriOps::fold_circle_into_line`].
 pub fn fold_circle_into_line(
     dst: &mut LineEvaluation<CpuBackend>,
-    src: &SecureEvaluation<CpuBackend>,
+    src: &SecureEvaluation<CpuBackend, BitReversedOrder>,
     alpha: SecureField,
 ) {
     assert_eq!(src.len() >> CIRCLE_TO_LINE_FOLD_STEP, dst.len());
@@ -1062,27 +976,25 @@ mod tests {
 
     use super::{get_opening_positions, FriVerificationError, SparseCircleEvaluation};
     use crate::core::backend::cpu::{CpuCircleEvaluation, CpuCirclePoly};
-    use crate::core::backend::{Col, Column, ColumnOps, CpuBackend};
+    use crate::core::backend::{ColumnOps, CpuBackend};
     use crate::core::circle::{CirclePointIndex, Coset};
     use crate::core::fields::m31::BaseField;
     use crate::core::fields::qm31::SecureField;
-    use crate::core::fields::secure_column::SecureColumnByCoords;
     use crate::core::fields::Field;
     use crate::core::fri::{
         fold_circle_into_line, fold_line, CirclePolyDegreeBound, FriConfig,
         CIRCLE_TO_LINE_FOLD_STEP,
     };
-    use crate::core::poly::circle::{CanonicCoset, CircleDomain, PolyOps, SecureEvaluation};
+    use crate::core::poly::circle::{CircleDomain, PolyOps, SecureEvaluation};
     use crate::core::poly::line::{LineDomain, LineEvaluation, LinePoly};
-    use crate::core::poly::NaturalOrder;
+    use crate::core::poly::{BitReversedOrder, NaturalOrder};
     use crate::core::queries::{Queries, SparseSubCircleDomain};
     use crate::core::test_utils::test_channel;
     use crate::core::utils::bit_reverse_index;
     use crate::core::vcs::blake2_merkle::Blake2sMerkleChannel;
-    use crate::m31;
 
     /// Default blowup factor used for tests.
-    const LOG_BLOWUP_FACTOR: u32 = 1;
+    const LOG_BLOWUP_FACTOR: u32 = 2;
 
     type FriProver = super::FriProver<CpuBackend, Blake2sMerkleChannel>;
     type FriVerifier = super::FriVerifier<Blake2sMerkleChannel>;
@@ -1159,10 +1071,10 @@ mod tests {
     fn committing_evaluation_from_invalid_domain_fails() {
         let invalid_domain = CircleDomain::new(Coset::new(CirclePointIndex::generator(), 3));
         assert!(!invalid_domain.is_canonic(), "must be an invalid domain");
-        let evaluation = SecureEvaluation {
-            domain: invalid_domain,
-            values: vec![SecureField::one(); 1 << 4].into_iter().collect(),
-        };
+        let evaluation = SecureEvaluation::new(
+            invalid_domain,
+            vec![SecureField::one(); 1 << 4].into_iter().collect(),
+        );
 
         FriProver::commit(
             &mut test_channel(),
@@ -1452,78 +1364,18 @@ mod tests {
         let _ = verifier.decommit_on_queries(&invalid_queries, vec![decommitment_value]);
     }
 
-    #[test]
-    fn low_degree_polynomials_outside_fft_space_pass_verification(
-    ) -> Result<(), FriVerificationError> {
-        const LOG_DEGREE: u32 = 9;
-        const LOG_DOMAIN_SIZE: u32 = LOG_DEGREE + 1;
-        let evaluation = riemann_roch_polynomial_evaluation(LOG_DOMAIN_SIZE);
-        let queries = Queries::from_positions(vec![2, 10, 11], LOG_DOMAIN_SIZE);
-        let config = FriConfig::new(1, 1, queries.len());
-        let decommitment_value = query_polynomial(&evaluation, &queries);
-        let prover = FriProver::commit(
-            &mut test_channel(),
-            config,
-            &[evaluation.clone(), evaluation.clone()],
-            &CpuBackend::precompute_twiddles(evaluation.domain.half_coset),
-        );
-        let proof = prover.decommit_on_queries(&queries);
-        let bound = vec![
-            CirclePolyDegreeBound::new(LOG_DEGREE),
-            CirclePolyDegreeBound::new(LOG_DEGREE),
-        ];
-        let verifier = FriVerifier::commit(&mut test_channel(), config, proof, bound).unwrap();
-
-        verifier.decommit_on_queries(
-            &queries,
-            vec![decommitment_value.clone(), decommitment_value],
-        )
-    }
-
-    #[test]
-    fn low_mixed_degree_polynomials_outside_fft_space_pass_verification(
-    ) -> Result<(), FriVerificationError> {
-        const LOG_DEGREES: [u32; 6] = [8, 5, 5, 5, 5, 4];
-        let evaluations = LOG_DEGREES.map(|log_d| riemann_roch_polynomial_evaluation(log_d + 1));
-        let log_domain_size = evaluations[0].domain.log_size();
-        let queries = Queries::from_positions(vec![3, 250, 500], log_domain_size);
-        let config = FriConfig::new(2, 1, queries.len());
-        let prover = FriProver::commit(
-            &mut test_channel(),
-            config,
-            &evaluations,
-            &CpuBackend::precompute_twiddles(evaluations[0].domain.half_coset),
-        );
-        let decommitment_values = evaluations.map(|p| query_polynomial(&p, &queries)).to_vec();
-        let proof = prover.decommit_on_queries(&queries);
-        let bounds = LOG_DEGREES.map(CirclePolyDegreeBound::new).to_vec();
-        let verifier = FriVerifier::commit(&mut test_channel(), config, proof, bounds).unwrap();
-
-        verifier.decommit_on_queries(&queries, decommitment_values)
-    }
-
     /// Returns an evaluation of a random polynomial with degree `2^log_degree`.
     ///
     /// The evaluation domain size is `2^(log_degree + log_blowup_factor)`.
     fn polynomial_evaluation(
         log_degree: u32,
         log_blowup_factor: u32,
-    ) -> SecureEvaluation<CpuBackend> {
+    ) -> SecureEvaluation<CpuBackend, BitReversedOrder> {
         let poly = CpuCirclePoly::new(vec![BaseField::one(); 1 << log_degree]);
         let coset = Coset::half_odds(log_degree + log_blowup_factor - 1);
         let domain = CircleDomain::new(coset);
         let values = poly.evaluate(domain);
-        SecureEvaluation {
-            domain,
-            values: SecureColumnByCoords {
-                columns: [
-                    values.values,
-                    Col::<CpuBackend, BaseField>::zeros(1 << (log_degree + log_blowup_factor)),
-                    Col::<CpuBackend, BaseField>::zeros(1 << (log_degree + log_blowup_factor)),
-                    Col::<CpuBackend, BaseField>::zeros(1 << (log_degree + log_blowup_factor)),
-                ],
-            },
-        }
+        SecureEvaluation::new(domain, values.into_iter().map(SecureField::from).collect())
     }
 
     /// Returns the log degree bound of a polynomial.
@@ -1535,7 +1387,7 @@ mod tests {
 
     // TODO: Remove after SubcircleDomain integration.
     fn query_polynomial(
-        polynomial: &SecureEvaluation<CpuBackend>,
+        polynomial: &SecureEvaluation<CpuBackend, BitReversedOrder>,
         queries: &Queries,
     ) -> SparseCircleEvaluation {
         let polynomial_log_size = polynomial.domain.log_size();
@@ -1545,7 +1397,7 @@ mod tests {
     }
 
     fn open_polynomial(
-        polynomial: &SecureEvaluation<CpuBackend>,
+        polynomial: &SecureEvaluation<CpuBackend, BitReversedOrder>,
         positions: &SparseSubCircleDomain,
     ) -> SparseCircleEvaluation {
         let coset_evals = positions
@@ -1568,30 +1420,5 @@ mod tests {
             .collect();
 
         SparseCircleEvaluation::new(coset_evals)
-    }
-
-    /// Returns an evaluation of a polynomial that is out of FFT-space but inside
-    /// riemann-roch-space.
-    fn riemann_roch_polynomial_evaluation(log_domain_size: u32) -> SecureEvaluation<CpuBackend> {
-        let mut coeffs = vec![BaseField::zero(); 1 << log_domain_size];
-        let domain_log_half_size = log_domain_size - 1;
-        // Polynomial is out of FFT space.
-        coeffs[1 << domain_log_half_size] = m31!(1);
-        coeffs[(1 << domain_log_half_size) - 1] = m31!(2);
-        let poly = CpuCirclePoly::new(coeffs);
-
-        let domain = CanonicCoset::new(log_domain_size).circle_domain();
-        let values = poly.evaluate(domain);
-        SecureEvaluation {
-            domain,
-            values: SecureColumnByCoords {
-                columns: [
-                    values.values,
-                    Col::<CpuBackend, BaseField>::zeros(1 << log_domain_size),
-                    Col::<CpuBackend, BaseField>::zeros(1 << log_domain_size),
-                    Col::<CpuBackend, BaseField>::zeros(1 << log_domain_size),
-                ],
-            },
-        }
     }
 }

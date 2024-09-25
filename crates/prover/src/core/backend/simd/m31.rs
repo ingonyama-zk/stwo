@@ -148,7 +148,7 @@ impl Mul for PackedM31 {
                 _mul_wasm(self, rhs)
             } else if #[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))] {
                 _mul_avx512(self, rhs)
-            } else if #[cfg(all(target_arch = "x86_64", target_feature = "avx2f"))] {
+            } else if #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))] {
                 _mul_avx2(self, rhs)
             } else {
                 _mul_simd(self, rhs)
@@ -163,6 +163,15 @@ impl Mul<M31> for PackedM31 {
     #[inline(always)]
     fn mul(self, rhs: M31) -> Self::Output {
         self * PackedM31::broadcast(rhs)
+    }
+}
+
+impl Add<M31> for PackedM31 {
+    type Output = PackedM31;
+
+    #[inline(always)]
+    fn add(self, rhs: M31) -> Self::Output {
+        PackedM31::broadcast(rhs) + self
     }
 }
 

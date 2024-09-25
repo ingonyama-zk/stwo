@@ -5,21 +5,21 @@ use num_traits::Zero;
 use serde::Serialize;
 use tracing::{span, Level};
 
-use super::round::{blake_round_info, BlakeRoundComponent};
-use super::scheduler::BlakeSchedulerComponent;
-use super::xor_table::XorTableComponent;
+use super::round::{blake_round_info, BlakeRoundComponent, BlakeRoundEval};
+use super::scheduler::{BlakeSchedulerComponent, BlakeSchedulerEval};
+use super::xor_table::{XorTableComponent, XorTableEval};
 use crate::constraint_framework::constant_columns::gen_is_first;
+use crate::constraint_framework::TraceLocationAllocator;
 use crate::core::air::{Component, ComponentProver};
 use crate::core::backend::simd::m31::LOG_N_LANES;
 use crate::core::backend::simd::SimdBackend;
 use crate::core::backend::BackendForChannel;
 use crate::core::channel::{Channel, MerkleChannel};
 use crate::core::fields::qm31::SecureField;
-use crate::core::pcs::{CommitmentSchemeProver, CommitmentSchemeVerifier, TreeVec};
+use crate::core::pcs::{CommitmentSchemeProver, CommitmentSchemeVerifier, PcsConfig, TreeVec};
 use crate::core::poly::circle::{CanonicCoset, PolyOps};
-use crate::core::prover::{prove, verify, StarkProof, VerificationError, LOG_BLOWUP_FACTOR};
+use crate::core::prover::{prove, verify, StarkProof, VerificationError};
 use crate::core::vcs::ops::MerkleHasher;
-use crate::core::InteractionElements;
 use crate::examples::blake::round::RoundElements;
 use crate::examples::blake::scheduler::{self, blake_scheduler_info, BlakeElements, BlakeInput};
 use crate::examples::blake::{
@@ -53,15 +53,10 @@ impl BlakeStatement0 {
         sizes.push(xor_table::trace_sizes::<7, 2>());
         sizes.push(xor_table::trace_sizes::<4, 0>());
 
-        TreeVec::new(
-            (0..=2)
-                .map(|i| sizes.iter().flat_map(|x| x[i].clone()).collect())
-                .collect(),
-        )
+        TreeVec::concat_cols(sizes.into_iter())
     }
     fn mix_into(&self, channel: &mut impl Channel) {
-        // TODO(spapini): Do this better.
-        channel.mix_nonce(self.log_size as u64);
+        channel.mix_u64(self.log_size as u64);
     }
 }
 
@@ -125,43 +120,67 @@ pub struct BlakeComponents {
 }
 impl BlakeComponents {
     fn new(stmt0: &BlakeStatement0, all_elements: &AllElements, stmt1: &BlakeStatement1) -> Self {
+        let tree_span_provider = &mut TraceLocationAllocator::default();
         Self {
-            scheduler_component: BlakeSchedulerComponent {
-                log_size: stmt0.log_size,
-                blake_lookup_elements: all_elements.blake_elements.clone(),
-                round_lookup_elements: all_elements.round_elements.clone(),
-                claimed_sum: stmt1.scheduler_claimed_sum,
-            },
+            scheduler_component: BlakeSchedulerComponent::new(
+                tree_span_provider,
+                BlakeSchedulerEval {
+                    log_size: stmt0.log_size,
+                    blake_lookup_elements: all_elements.blake_elements.clone(),
+                    round_lookup_elements: all_elements.round_elements.clone(),
+                    total_sum: stmt1.scheduler_claimed_sum,
+                },
+            ),
             round_components: ROUND_LOG_SPLIT
                 .iter()
                 .zip(stmt1.round_claimed_sums.clone())
-                .map(|(l, claimed_sum)| BlakeRoundComponent {
-                    log_size: stmt0.log_size + l,
-                    xor_lookup_elements: all_elements.xor_elements.clone(),
-                    round_lookup_elements: all_elements.round_elements.clone(),
-                    claimed_sum,
+                .map(|(l, claimed_sum)| {
+                    BlakeRoundComponent::new(
+                        tree_span_provider,
+                        BlakeRoundEval {
+                            log_size: stmt0.log_size + l,
+                            xor_lookup_elements: all_elements.xor_elements.clone(),
+                            round_lookup_elements: all_elements.round_elements.clone(),
+                            total_sum: claimed_sum,
+                        },
+                    )
                 })
                 .collect(),
-            xor12: XorTableComponent {
-                lookup_elements: all_elements.xor_elements.xor12.clone(),
-                claimed_sum: stmt1.xor12_claimed_sum,
-            },
-            xor9: XorTableComponent {
-                lookup_elements: all_elements.xor_elements.xor9.clone(),
-                claimed_sum: stmt1.xor9_claimed_sum,
-            },
-            xor8: XorTableComponent {
-                lookup_elements: all_elements.xor_elements.xor8.clone(),
-                claimed_sum: stmt1.xor8_claimed_sum,
-            },
-            xor7: XorTableComponent {
-                lookup_elements: all_elements.xor_elements.xor7.clone(),
-                claimed_sum: stmt1.xor7_claimed_sum,
-            },
-            xor4: XorTableComponent {
-                lookup_elements: all_elements.xor_elements.xor4.clone(),
-                claimed_sum: stmt1.xor4_claimed_sum,
-            },
+            xor12: XorTableComponent::new(
+                tree_span_provider,
+                XorTableEval {
+                    lookup_elements: all_elements.xor_elements.xor12.clone(),
+                    claimed_sum: stmt1.xor12_claimed_sum,
+                },
+            ),
+            xor9: XorTableComponent::new(
+                tree_span_provider,
+                XorTableEval {
+                    lookup_elements: all_elements.xor_elements.xor9.clone(),
+                    claimed_sum: stmt1.xor9_claimed_sum,
+                },
+            ),
+            xor8: XorTableComponent::new(
+                tree_span_provider,
+                XorTableEval {
+                    lookup_elements: all_elements.xor_elements.xor8.clone(),
+                    claimed_sum: stmt1.xor8_claimed_sum,
+                },
+            ),
+            xor7: XorTableComponent::new(
+                tree_span_provider,
+                XorTableEval {
+                    lookup_elements: all_elements.xor_elements.xor7.clone(),
+                    claimed_sum: stmt1.xor7_claimed_sum,
+                },
+            ),
+            xor4: XorTableComponent::new(
+                tree_span_provider,
+                XorTableEval {
+                    lookup_elements: all_elements.xor_elements.xor4.clone(),
+                    claimed_sum: stmt1.xor4_claimed_sum,
+                },
+            ),
         }
     }
     fn components(&self) -> Vec<&dyn Component> {
@@ -198,7 +217,7 @@ impl BlakeComponents {
 }
 
 #[allow(unused)]
-pub fn prove_blake<MC: MerkleChannel>(log_size: u32) -> (BlakeProof<MC::H>)
+pub fn prove_blake<MC: MerkleChannel>(log_size: u32, config: PcsConfig) -> (BlakeProof<MC::H>)
 where
     SimdBackend: BackendForChannel<MC>,
 {
@@ -214,7 +233,7 @@ where
     let log_max_rows =
         (log_size + *ROUND_LOG_SPLIT.iter().max().unwrap()).max(XOR_TABLE_MAX_LOG_SIZE);
     let twiddles = SimdBackend::precompute_twiddles(
-        CanonicCoset::new(log_max_rows + 1 + LOG_BLOWUP_FACTOR)
+        CanonicCoset::new(log_max_rows + 1 + config.fri_config.log_blowup_factor)
             .circle_domain()
             .half_coset,
     );
@@ -231,7 +250,7 @@ where
 
     // Setup protocol.
     let channel = &mut MC::C::default();
-    let commitment_scheme = &mut CommitmentSchemeProver::new(LOG_BLOWUP_FACTOR, &twiddles);
+    let commitment_scheme = &mut CommitmentSchemeProver::new(config, &twiddles);
 
     let span = span!(Level::INFO, "Trace").entered();
 
@@ -344,12 +363,16 @@ where
     span.exit();
 
     // Constant trace.
+    // TODO(ShaharS): share is_first column between components when constant columns support this.
     let span = span!(Level::INFO, "Constant Trace").entered();
     let mut tree_builder = commitment_scheme.tree_builder();
     tree_builder.extend_evals(
         chain![
-            [gen_is_first(log_size)],
-            ROUND_LOG_SPLIT.map(|l| gen_is_first(log_size + l)),
+            vec![gen_is_first(log_size)],
+            ROUND_LOG_SPLIT
+                .iter()
+                .map(|l| gen_is_first(log_size + l))
+                .collect_vec(),
             xor_table::generate_constant_trace::<12, 4>(),
             xor_table::generate_constant_trace::<9, 2>(),
             xor_table::generate_constant_trace::<8, 2>(),
@@ -372,13 +395,7 @@ where
 
     // Prove constraints.
     let components = BlakeComponents::new(&stmt0, &all_elements, &stmt1);
-    let stark_proof = prove::<SimdBackend, _>(
-        &components.component_provers(),
-        channel,
-        &InteractionElements::default(),
-        commitment_scheme,
-    )
-    .unwrap();
+    let stark_proof = prove(&components.component_provers(), channel, commitment_scheme).unwrap();
 
     BlakeProof {
         stmt0,
@@ -394,9 +411,10 @@ pub fn verify_blake<MC: MerkleChannel>(
         stmt1,
         stark_proof,
     }: BlakeProof<MC::H>,
+    config: PcsConfig,
 ) -> Result<(), VerificationError> {
     let channel = &mut MC::C::default();
-    let commitment_scheme = &mut CommitmentSchemeVerifier::<MC>::new();
+    let commitment_scheme = &mut CommitmentSchemeVerifier::<MC>::new(config);
 
     let log_sizes = stmt0.log_sizes();
 
@@ -425,13 +443,12 @@ pub fn verify_blake<MC: MerkleChannel>(
         + stmt1.xor7_claimed_sum
         + stmt1.xor4_claimed_sum;
 
-    // TODO(spapini): Add inputs to sum, and constraint them.
+    // TODO(shahars): Add inputs to sum, and constraint them.
     assert_eq!(total_sum, SecureField::zero());
 
     verify(
         &components.components(),
         channel,
-        &InteractionElements::default(), // Not in use.
         commitment_scheme,
         stark_proof,
     )
@@ -441,11 +458,12 @@ pub fn verify_blake<MC: MerkleChannel>(
 mod tests {
     use std::env;
 
+    use crate::core::pcs::PcsConfig;
     use crate::core::vcs::blake2_merkle::Blake2sMerkleChannel;
     use crate::examples::blake::air::{prove_blake, verify_blake};
 
     // Note: this test is slow. Only run in release.
-    #[ignore]
+    #[cfg_attr(not(feature = "slow-tests"), ignore)]
     #[test_log::test]
     fn test_simd_blake_prove() {
         // Note: To see time measurement, run test with
@@ -458,11 +476,12 @@ mod tests {
             .unwrap_or_else(|_| "6".to_string())
             .parse::<u32>()
             .unwrap();
+        let config = PcsConfig::default();
 
         // Prove.
-        let proof = prove_blake::<Blake2sMerkleChannel>(log_n_instances);
+        let proof = prove_blake::<Blake2sMerkleChannel>(log_n_instances, config);
 
         // Verify.
-        verify_blake::<Blake2sMerkleChannel>(proof).unwrap();
+        verify_blake::<Blake2sMerkleChannel>(proof, config).unwrap();
     }
 }

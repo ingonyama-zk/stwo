@@ -107,8 +107,8 @@ pub fn gen_trace(
     let domain = CanonicCoset::new(log_size).circle_domain();
     let trace = trace
         .into_iter()
-        .map(|eval| CircleEvaluation::<SimdBackend, _, BitReversedOrder>::new(domain, eval))
-        .collect_vec();
+        .map(|eval| CircleEvaluation::new(domain, eval))
+        .collect();
 
     (trace, lookup_data, round_inputs)
 }
@@ -158,14 +158,14 @@ pub fn gen_interaction_trace(
                     .each_ref()
                     .map(|l| l.data[vec_row]),
             );
-            // TODO(spapini): Change blake numerator to p_blake - p_round.
+            // TODO(alont): Remove.
             col_gen.write_frac(vec_row, p_blake, p_round * p_blake);
         } else {
-            // TODO(spapini): Change numerator to -1.
+            // TODO(alont): Remove.
             col_gen.write_frac(vec_row, PackedSecureField::zero(), p_blake);
         }
     }
     col_gen.finalize_col();
 
-    logup_gen.finalize()
+    logup_gen.finalize_last()
 }
