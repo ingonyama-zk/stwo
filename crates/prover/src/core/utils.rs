@@ -160,7 +160,7 @@ pub fn bit_reverse<T>(v: &mut [T]) {
         use icicle_core::vec_ops::{bit_reverse_inplace, BitReverseConfig, VecOps};
         use icicle_cuda_runtime::device::get_device_from_pointer;
         use icicle_cuda_runtime::memory::{DeviceSlice, HostSlice};
-        use icicle_m31::field::{CExtensionField, ExtensionField, ScalarField};
+        use icicle_m31::field::{ComplexExtensionField, QuarticExtensionField, ScalarField};
 
         fn bit_rev_generic<T, F>(v: &mut [T], n: usize)
         where
@@ -184,9 +184,9 @@ pub fn bit_reverse<T>(v: &mut [T]) {
         if limbs_count == 1 {
             bit_rev_generic::<T, ScalarField>(v, n);
         } else if limbs_count == 2 {
-            bit_rev_generic::<T, CExtensionField>(v, n);
+            bit_rev_generic::<T, ComplexExtensionField>(v, n);
         } else if limbs_count == 4 {
-            bit_rev_generic::<T, ExtensionField>(v, n);
+            bit_rev_generic::<T, QuarticExtensionField>(v, n);
         }
     }
 }

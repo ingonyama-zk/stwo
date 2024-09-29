@@ -123,7 +123,7 @@ mod icicle_poc {
     use icicle_cuda_runtime::device_context::DeviceContext;
     use icicle_cuda_runtime::memory::{DeviceSlice, DeviceVec, HostOrDeviceSlice, HostSlice};
     use icicle_cuda_runtime::stream::CudaStream;
-    use icicle_m31::field::{ExtensionField, ScalarField};
+    use icicle_m31::field::{QuarticExtensionField, ScalarField};
 
     use super::SecureColumnByCoords;
     use crate::core::backend::simd::column;
@@ -133,7 +133,7 @@ mod icicle_poc {
     use crate::core::fields::FieldOps;
 
     impl SecureColumnByCoords<CpuBackend> {
-        pub fn convert_to_icicle(input: &Self, d_output: &mut DeviceSlice<ExtensionField>) {
+        pub fn convert_to_icicle(input: &Self, d_output: &mut DeviceSlice<QuarticExtensionField>) {
             let zero = ScalarField::zero();
 
             let n = input.columns[0].len();

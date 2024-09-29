@@ -28,25 +28,21 @@ impl AccumulationOps for CpuBackend {
                 use icicle_core::vec_ops::VecOps;
                 use icicle_cuda_runtime::device::get_device_from_pointer;
                 use icicle_cuda_runtime::memory::{DeviceSlice, HostSlice};
-                use icicle_m31::field::{ExtensionField, ScalarField};
+                use icicle_m31::field::{QuarticExtensionField, ScalarField};
 
                 let mut a_ptr = column as *mut _ as *mut c_void;
                 let mut d_a_slice;
                 let n = column.columns[0].len();
                 let secure_degree = column.columns.len();
 
-                for i in 0..secure_degree {
-                    assert_eq!(column.columns[i].len(), n);
-                }
-
                 let is_a_on_host = get_device_from_pointer(a_ptr).unwrap() == 18446744073709551614;
                 let mut col_a;
                 if is_a_on_host {
-                    col_a = DeviceVec::<ExtensionField>::cuda_malloc(n).unwrap();
+                    col_a = DeviceVec::<QuarticExtensionField>::cuda_malloc(n).unwrap();
                     d_a_slice = &mut col_a[..];
                     SecureColumnByCoords::convert_to_icicle(column, d_a_slice);
                 } else {
-                    let mut v_ptr = a_ptr as *mut ExtensionField;
+                    let mut v_ptr = a_ptr as *mut QuarticExtensionField;
                     let rr = unsafe { slice::from_raw_parts_mut(v_ptr, n) };
                     d_a_slice = DeviceSlice::from_mut_slice(rr);
                 }
@@ -54,11 +50,11 @@ impl AccumulationOps for CpuBackend {
                 let mut d_b_slice;
                 let mut col_b;
                 if get_device_from_pointer(b_ptr).unwrap() == 18446744073709551614 {
-                    col_b = DeviceVec::<ExtensionField>::cuda_malloc(n).unwrap();
+                    col_b = DeviceVec::<QuarticExtensionField>::cuda_malloc(n).unwrap();
                     d_b_slice = &mut col_b[..];
                     SecureColumnByCoords::convert_to_icicle(other, d_b_slice);
                 } else {
-                    let mut v_ptr = b_ptr as *mut ExtensionField;
+                    let mut v_ptr = b_ptr as *mut QuarticExtensionField;
                     let rr = unsafe { slice::from_raw_parts_mut(v_ptr, n) };
                     d_b_slice = DeviceSlice::from_mut_slice(rr);
                 }
