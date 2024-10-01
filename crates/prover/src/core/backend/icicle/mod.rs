@@ -154,7 +154,9 @@ impl MerkleOps<Blake2sMerkleHasher> for IcicleBackend {
         columns: &[&Col<Self, BaseField>],
     ) -> Col<Self, <Blake2sMerkleHasher as MerkleHasher>::Hash> {
         // todo!()
-        CpuBackend::commit_on_layer(log_size, prev_layer, columns)
+        <CpuBackend as MerkleOps<Blake2sMerkleHasher>>::commit_on_layer(
+            log_size, prev_layer, columns,
+        )
     }
 }
 
@@ -167,7 +169,7 @@ impl PolyOps for IcicleBackend {
         values: Col<Self, BaseField>,
     ) -> CircleEvaluation<Self, BaseField, BitReversedOrder> {
         // todo!()
-        unsafe { transmute( CpuBackend::new_canonical_ordered(coset, values)) }
+        unsafe { transmute(CpuBackend::new_canonical_ordered(coset, values)) }
     }
 
     fn interpolate(
@@ -289,11 +291,13 @@ impl MerkleOps<Poseidon252MerkleHasher> for IcicleBackend {
         columns: &[&Col<Self, BaseField>],
     ) -> Col<Self, <Poseidon252MerkleHasher as MerkleHasher>::Hash> {
         // todo!()
-        let prev_layer:Option<&Col<CpuBackend, Poseidon252MerkleHasher>>= unsafe { transmute(prev_layer) };
-        // let prev_layer:Option<&Col<CpuBackend, <Poseidon252MerkleHasher as MerkleHasher>::Hash>> = unsafe { transmute(prev_layer) };
-        let columns: &[&Col<CpuBackend, BaseField>] = unsafe { transmute(columns) };
-        let result:Col<CpuBackend, <Poseidon252MerkleHasher as MerkleHasher>::Hash> = MerkleOps::<Poseidon252MerkleHasher>::commit_on_layer(log_size, prev_layer, columns);
-        unsafe {  transmute(result) }
+        unsafe {
+            transmute(
+                <CpuBackend as MerkleOps<Poseidon252MerkleHasher>>::commit_on_layer(
+                    log_size, prev_layer, columns,
+                ),
+            )
+        }
     }
 }
 
