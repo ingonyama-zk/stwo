@@ -4,12 +4,9 @@ use std::ops::{Add, Mul, Sub};
 
 use num_traits::{One, Zero};
 
-use super::circle::CirclePoint;
-use super::constraints::point_vanishing;
 use super::fields::m31::BaseField;
 use super::fields::qm31::SecureField;
-use super::fields::{Field, FieldExpOps};
-use super::poly::circle::CircleDomain;
+use super::fields::Field;
 
 pub trait IteratorMutExt<'a, T: 'a>: Iterator<Item = &'a mut T> {
     fn assign(self, other: impl IntoIterator<Item = T>)
@@ -122,11 +119,15 @@ pub(crate) fn coset_order_to_circle_domain_order<F: Field>(values: &[F]) -> Vec<
     circle_domain_order
 }
 
-pub fn coset_order_to_circle_domain_order_index(index: usize, log_size: u32) -> usize {
-    if index & 1 == 0 {
-        index / 2
+/// Converts an index within a [`Coset`] to the corresponding index in a [`CircleDomain`].
+///
+/// [`CircleDomain`]: crate::core::poly::circle::CircleDomain
+/// [`Coset`]: crate::core::circle::Coset
+pub fn coset_index_to_circle_domain_index(coset_index: usize, log_domain_size: u32) -> usize {
+    if coset_index % 2 == 0 {
+        coset_index / 2
     } else {
-        (1 << log_size) - (index + 1) / 2
+        ((2 << log_domain_size) - coset_index) / 2
     }
 }
 
@@ -135,8 +136,7 @@ pub fn coset_order_to_circle_domain_order_index(index: usize, log_size: u32) -> 
 /// # Panics
 ///
 /// Panics if the length of the slice is not a power of two.
-// TODO: Implement cache friendly implementation.
-// TODO(spapini): Move this to the cpu backend.
+// TODO(alont): Move this to the cpu backend.
 pub fn bit_reverse<T>(v: &mut [T]) {
     let n = v.len();
     assert!(n.is_power_of_two());
@@ -160,7 +160,7 @@ pub fn bit_reverse<T>(v: &mut [T]) {
         use icicle_core::vec_ops::{bit_reverse_inplace, BitReverseConfig, VecOps};
         use icicle_cuda_runtime::device::get_device_from_pointer;
         use icicle_cuda_runtime::memory::{DeviceSlice, HostSlice};
-        use icicle_m31::field::{CExtensionField, ExtensionField, ScalarField};
+        use icicle_m31::field::{ComplexExtensionField, QuarticExtensionField, ScalarField};
 
         fn bit_rev_generic<T, F>(v: &mut [T], n: usize)
         where
@@ -185,9 +185,9 @@ pub fn bit_reverse<T>(v: &mut [T]) {
         if limbs_count == 1 {
             bit_rev_generic::<T, ScalarField>(v, n);
         } else if limbs_count == 2 {
-            bit_rev_generic::<T, CExtensionField>(v, n);
+            bit_rev_generic::<T, ComplexExtensionField>(v, n);
         } else if limbs_count == 4 {
-            bit_rev_generic::<T, ExtensionField>(v, n);
+            bit_rev_generic::<T, QuarticExtensionField>(v, n);
         }
     }
 }
@@ -212,21 +212,6 @@ where
         .iter()
         .fold(EF::zero(), |acc, &value| acc * alpha + value);
     res - z
-}
-
-pub fn point_vanish_denominator_inverses(
-    domain: CircleDomain,
-    vanish_point: CirclePoint<BaseField>,
-) -> Vec<BaseField> {
-    let mut denoms = vec![];
-    for point in domain.iter() {
-        // TODO(AlonH): Use `point_vanishing_fraction` instead of `point_vanishing` everywhere.
-        denoms.push(point_vanishing(vanish_point, point));
-    }
-    bit_reverse(&mut denoms);
-    let mut denom_inverses = vec![BaseField::zero(); 1 << (domain.log_size())];
-    BaseField::batch_inverse(&denoms, &mut denom_inverses);
-    denom_inverses
 }
 
 #[cfg(test)]
@@ -313,7 +298,7 @@ mod tests {
         let n = 1 << log_size;
         let domain = CanonicCoset::new(log_size).circle_domain();
         let values = (0..n).map(|i| m31!(i as u32)).collect_vec();
-        let evaluation = CpuCircleEvaluation::<_, NaturalOrder>::new(domain, values.clone());
+        let evaluation = CpuCircleEvaluation::<_, NaturalOrder>::new(domain, values);
         let bit_reversed_evaluation = evaluation.clone().bit_reverse();
 
         //            2   ·  14

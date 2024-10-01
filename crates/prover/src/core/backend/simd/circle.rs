@@ -1,16 +1,19 @@
 use std::iter::zip;
 use std::mem::transmute;
+use std::simd::Simd;
 
-use bytemuck::{cast_slice, Zeroable};
+use bytemuck::Zeroable;
 use num_traits::One;
 
-use super::fft::{ifft, rfft, CACHED_FFT_LOG_SIZE};
+use super::fft::{ifft, rfft, CACHED_FFT_LOG_SIZE, MIN_FFT_LOG_SIZE};
 use super::m31::{PackedBaseField, LOG_N_LANES, N_LANES};
 use super::qm31::PackedSecureField;
 use super::SimdBackend;
+use crate::core::backend::cpu::circle::slow_precompute_twiddles;
 use crate::core::backend::simd::column::BaseColumn;
-use crate::core::backend::{Col, CpuBackend};
-use crate::core::circle::{CirclePoint, Coset};
+use crate::core::backend::simd::m31::PackedM31;
+use crate::core::backend::{Col, Column, CpuBackend};
+use crate::core::circle::{CirclePoint, Coset, M31_CIRCLE_LOG_ORDER};
 use crate::core::fields::m31::BaseField;
 use crate::core::fields::qm31::SecureField;
 use crate::core::fields::{Field, FieldExpOps};
@@ -20,6 +23,7 @@ use crate::core::poly::circle::{
 use crate::core::poly::twiddles::TwiddleTree;
 use crate::core::poly::utils::{domain_line_twiddles_from_tree, fold};
 use crate::core::poly::BitReversedOrder;
+use crate::core::utils::bit_reverse_index;
 
 impl SimdBackend {
     // TODO(Ohad): optimize.
@@ -31,9 +35,9 @@ impl SimdBackend {
         );
 
         let mut product = F::one();
-        for &num in mappings.iter() {
+        for num in mappings.iter() {
             if index & 1 == 1 {
-                product *= num;
+                product *= *num;
             }
             index >>= 1;
             if index == 0 {
@@ -104,8 +108,8 @@ impl SimdBackend {
             .iter()
             .skip(1)
             .zip(denom_inverses.iter())
-            .for_each(|(&m, &d)| {
-                steps.push(m * d);
+            .for_each(|(m, d)| {
+                steps.push(*m * *d);
             });
         steps.push(F::one());
         steps
@@ -119,11 +123,11 @@ impl SimdBackend {
     }
 }
 
-// TODO(spapini): Everything is returned in redundant representation, where values can also be P.
+// TODO(shahars): Everything is returned in redundant representation, where values can also be P.
 // Decide if and when it's ok and what to do if it's not.
 impl PolyOps for SimdBackend {
     // The twiddles type is i32, and not BaseField. This is because the fast AVX mul implementation
-    //  requries one of the numbers to be shifted left by 1 bit. This is not a reduced
+    //  requires one of the numbers to be shifted left by 1 bit. This is not a reduced
     //  representation of the field.
     type Twiddles = Vec<u32>;
 
@@ -131,7 +135,7 @@ impl PolyOps for SimdBackend {
         coset: CanonicCoset,
         values: Col<Self, BaseField>,
     ) -> CircleEvaluation<Self, BaseField, BitReversedOrder> {
-        // TODO(spapini): Optimize.
+        // TODO(Ohad): Optimize.
         let eval = CpuBackend::new_canonical_ordered(coset, values.into_cpu_vec());
         CircleEvaluation::new(
             eval.domain,
@@ -143,9 +147,13 @@ impl PolyOps for SimdBackend {
         eval: CircleEvaluation<Self, BaseField, BitReversedOrder>,
         twiddles: &TwiddleTree<Self>,
     ) -> CirclePoly<Self> {
-        let mut values = eval.values;
-        let log_size = values.length.ilog2();
+        let log_size = eval.values.length.ilog2();
+        if log_size < MIN_FFT_LOG_SIZE {
+            let cpu_poly = eval.to_cpu().interpolate();
+            return CirclePoly::new(cpu_poly.coeffs.into_iter().collect());
+        }
 
+        let mut values = eval.values;
         let twiddles = domain_line_twiddles_from_tree(eval.domain, &twiddles.itwiddles);
 
         // Safe because [PackedBaseField] is aligned on 64 bytes.
@@ -157,7 +165,7 @@ impl PolyOps for SimdBackend {
             );
         }
 
-        // TODO(spapini): Fuse this multiplication / rotation.
+        // TODO(alont): Cache this inversion.
         let inv = PackedBaseField::broadcast(BaseField::from(eval.domain.size()).inverse());
         values.data.iter_mut().for_each(|x| *x *= inv);
 
@@ -211,7 +219,7 @@ impl PolyOps for SimdBackend {
     }
 
     fn extend(poly: &CirclePoly<Self>, log_size: u32) -> CirclePoly<Self> {
-        // TODO(spapini): Optimize or get rid of extend.
+        // TODO(shahars): Get rid of extends.
         poly.evaluate(CanonicCoset::new(log_size).circle_domain())
             .interpolate()
     }
@@ -221,14 +229,22 @@ impl PolyOps for SimdBackend {
         domain: CircleDomain,
         twiddles: &TwiddleTree<Self>,
     ) -> CircleEvaluation<Self, BaseField, BitReversedOrder> {
-        // TODO(spapini): Precompute twiddles.
-        // TODO(spapini): Handle small cases.
+        // TODO(AlonH): Handle small cases.
         let log_size = domain.log_size();
         let fft_log_size = poly.log_size();
         assert!(
             log_size >= fft_log_size,
             "Can only evaluate on larger domains"
         );
+
+        if fft_log_size < MIN_FFT_LOG_SIZE {
+            let cpu_poly: CirclePoly<CpuBackend> = CirclePoly::new(poly.coeffs.to_cpu());
+            let cpu_eval = cpu_poly.evaluate(domain);
+            return CircleEvaluation::new(
+                cpu_eval.domain,
+                Col::<SimdBackend, BaseField>::from_iter(cpu_eval.values),
+            );
+        }
 
         let twiddles = domain_line_twiddles_from_tree(domain, &twiddles.twiddles);
 
@@ -275,29 +291,93 @@ impl PolyOps for SimdBackend {
         )
     }
 
-    fn precompute_twiddles(coset: Coset) -> TwiddleTree<Self> {
-        let mut twiddles = Vec::with_capacity(coset.size());
-        let mut itwiddles = Vec::with_capacity(coset.size());
+    /// Precomputes the (doubled) twiddles for a given coset tower.
+    /// The twiddles are the x values of each coset in bit-reversed order.
+    /// Note: the coset point are symmetrical over the x-axis so only the first half of the coset is
+    /// needed.
+    fn precompute_twiddles(mut coset: Coset) -> TwiddleTree<Self> {
+        let root_coset = coset;
 
-        // TODO(spapini): Optimize.
-        for layer in &rfft::get_twiddle_dbls(coset) {
-            twiddles.extend(layer);
+        if root_coset.size() < N_LANES {
+            return compute_small_coset_twiddles(root_coset);
         }
-        // Pad by any value, to make the size a power of 2.
-        twiddles.push(1);
-        assert_eq!(twiddles.len(), coset.size());
-        for layer in &ifft::get_itwiddle_dbls(coset) {
-            itwiddles.extend(layer);
+
+        let mut twiddles = Vec::with_capacity(coset.size() / N_LANES);
+        while coset.log_size() > LOG_N_LANES {
+            compute_coset_twiddles(coset, &mut twiddles);
+            coset = coset.double();
         }
-        // Pad by any value, to make the size a power of 2.
-        itwiddles.push(1);
-        assert_eq!(itwiddles.len(), coset.size());
+
+        // Handle cosets smaller than `N_LANES`.
+        let remaining_twiddles = slow_precompute_twiddles(coset);
+
+        twiddles.push(PackedM31::from_array(
+            remaining_twiddles.try_into().unwrap(),
+        ));
+
+        let mut itwiddles = unsafe { BaseColumn::uninitialized(root_coset.size()) }.data;
+        PackedBaseField::batch_inverse(&twiddles, &mut itwiddles);
+
+        let dbl_twiddles = twiddles
+            .into_iter()
+            .flat_map(|x| (x.into_simd() * Simd::splat(2)).to_array())
+            .collect();
+        let dbl_itwiddles = itwiddles
+            .into_iter()
+            .flat_map(|x| (x.into_simd() * Simd::splat(2)).to_array())
+            .collect();
 
         TwiddleTree {
-            root_coset: coset,
-            twiddles,
-            itwiddles,
+            root_coset,
+            twiddles: dbl_twiddles,
+            itwiddles: dbl_itwiddles,
         }
+    }
+}
+
+fn compute_small_coset_twiddles(coset: Coset) -> TwiddleTree<SimdBackend> {
+    let twiddles = slow_precompute_twiddles(coset);
+
+    let dbl_twiddles = twiddles.iter().map(|x| x.0 * 2).collect();
+    let dbl_itwiddles = twiddles.iter().map(|x| x.inverse().0 * 2).collect();
+    TwiddleTree {
+        root_coset: coset,
+        twiddles: dbl_twiddles,
+        itwiddles: dbl_itwiddles,
+    }
+}
+
+/// Computes the twiddles of the coset in bit-reversed order. Optimized for SIMD.
+fn compute_coset_twiddles(coset: Coset, twiddles: &mut Vec<PackedM31>) {
+    let log_size = coset.log_size() - 1;
+    assert!(log_size >= LOG_N_LANES);
+
+    // Compute the first `N_LANES` circle points.
+    let initial_points = std::array::from_fn(|i| coset.at(bit_reverse_index(i, log_size)));
+    let mut current = CirclePoint {
+        x: PackedM31::from_array(initial_points.each_ref().map(|p| p.x)),
+        y: PackedM31::from_array(initial_points.each_ref().map(|p| p.y)),
+    };
+
+    // Precompute the steps needed to compute the next circle points in bit reversed order.
+    let mut steps = [CirclePoint::zero(); (M31_CIRCLE_LOG_ORDER - LOG_N_LANES) as usize];
+    for i in 0..(log_size - LOG_N_LANES) {
+        let prev_mul = bit_reverse_index((1 << i) - 1, log_size - LOG_N_LANES);
+        let new_mul = bit_reverse_index(1 << i, log_size - LOG_N_LANES);
+        let step = coset.step.mul(new_mul as u128) - coset.step.mul(prev_mul as u128);
+        steps[i as usize] = step;
+    }
+
+    for i in 0u32..1 << (log_size - LOG_N_LANES) {
+        // Extract twiddle and compute the next `N_LANES` circle points.
+        let x = current.x;
+        let step_index = i.trailing_ones() as usize;
+        let step = CirclePoint {
+            x: PackedM31::broadcast(steps[step_index].x),
+            y: PackedM31::broadcast(steps[step_index].y),
+        };
+        current = current + step;
+        twiddles.push(x);
     }
 }
 
@@ -323,18 +403,19 @@ fn slow_eval_at_point(
         // Swap content of a,c.
         a.swap_with_slice(&mut c[0..n0]);
     }
-    fold(cast_slice::<_, BaseField>(&poly.coeffs.data), &mappings)
+    fold(poly.coeffs.as_slice(), &mappings)
 }
 
 #[cfg(test)]
 mod tests {
+    use itertools::Itertools;
     use rand::rngs::SmallRng;
     use rand::{Rng, SeedableRng};
 
     use crate::core::backend::simd::circle::slow_eval_at_point;
     use crate::core::backend::simd::fft::{CACHED_FFT_LOG_SIZE, MIN_FFT_LOG_SIZE};
     use crate::core::backend::simd::SimdBackend;
-    use crate::core::backend::Column;
+    use crate::core::backend::{Column, CpuBackend};
     use crate::core::circle::CirclePoint;
     use crate::core::fields::m31::BaseField;
     use crate::core::poly::circle::{CanonicCoset, CircleEvaluation, CirclePoly, PolyOps};
@@ -432,5 +513,21 @@ mod tests {
 
             assert_eq!(eval, slow_eval_at_point(&poly, p), "log_size = {log_size}");
         }
+    }
+
+    #[test]
+    fn test_optimized_precompute_twiddles() {
+        let coset = CanonicCoset::new(10).half_coset();
+        let twiddles = SimdBackend::precompute_twiddles(coset);
+        let expected_twiddles = CpuBackend::precompute_twiddles(coset);
+
+        assert_eq!(
+            twiddles.twiddles,
+            expected_twiddles
+                .twiddles
+                .iter()
+                .map(|x| x.0 * 2)
+                .collect_vec()
+        );
     }
 }

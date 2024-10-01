@@ -28,7 +28,6 @@ use crate::core::proof_of_work::GrindOps;
 use crate::core::vcs::blake2_merkle::{Blake2sMerkleChannel, Blake2sMerkleHasher};
 use crate::core::vcs::ops::{MerkleHasher, MerkleOps};
 use crate::core::vcs::poseidon252_merkle::{Poseidon252MerkleChannel, Poseidon252MerkleHasher};
-
 #[derive(Copy, Clone, Debug, Deserialize, Serialize, Default)]
 pub struct IcicleBackend;
 
@@ -82,7 +81,7 @@ impl MleOps<SecureField> for IcicleBackend {
 
 // stwo/crates/prover/src/core/backend/cpu/accumulation.rs
 impl AccumulationOps for IcicleBackend {
-    fn accumulate(column: &mut SecureColumnByCoords<Self>, other: &mut SecureColumnByCoords<Self>) {
+    fn accumulate(column: &mut SecureColumnByCoords<Self>, other: &SecureColumnByCoords<Self>) {
         let cfg = VecOpsConfig::default();
         other.convert_to_icicle(); // TODO: required on all calls or? make automated/semi- like when needed, or assume data is
                                    // already converted
@@ -95,10 +94,10 @@ impl AccumulationOps for IcicleBackend {
         .unwrap();
     }
 
-    fn confirm(column: &mut SecureColumnByCoords<Self>) {
-        column.convert_from_icicle(); // TODO: won't be necessary here on each call, only send back
-                                      // to stwo core
-    }
+    // fn confirm(column: &mut SecureColumnByCoords<Self>) {
+    //     column.convert_from_icicle(); // TODO: won't be necessary here on each call, only send back
+    //                                   // to stwo core
+    // }
 }
 
 // stwo/crates/prover/src/core/backend/cpu/blake2s.rs
@@ -160,29 +159,7 @@ impl PolyOps for IcicleBackend {
 
 // stwo/crates/prover/src/core/backend/cpu/fri.rs
 impl FriOps for IcicleBackend {
-    fn fold_line(
-        eval: &LineEvaluation<Self>,
-        alpha: SecureField,
-        twiddles: &TwiddleTree<Self>,
-    ) -> LineEvaluation<Self> {
-        // todo!()
-        CpuBackend::fold_line(eval, alpha, twiddles)
-    }
-
-    fn fold_circle_into_line(
-        dst: &mut LineEvaluation<Self>,
-        src: &SecureEvaluation<Self>,
-        alpha: SecureField,
-        twiddles: &TwiddleTree<Self>,
-    ) {
-        // todo!()
-        CpuBackend::fold_circle_into_line(dst, src, alpha, twiddles)
-    }
-
-    fn decompose(eval: &SecureEvaluation<Self>) -> (SecureEvaluation<Self>, SecureField) {
-        // todo!()
-        CpuBackend::decompose(eval)
-    }
+    
 }
 
 // stwo/crates/prover/src/core/backend/cpu/grind.rs
@@ -215,15 +192,7 @@ impl<F: Field> FieldOps<F> for IcicleBackend {
 
 // stwo/crates/prover/src/core/backend/cpu/quotients.rs
 impl QuotientOps for IcicleBackend {
-    fn accumulate_quotients(
-        domain: CircleDomain,
-        columns: &[&CircleEvaluation<Self, BaseField, BitReversedOrder>],
-        random_coeff: SecureField,
-        sample_batches: &[ColumnSampleBatch],
-    ) -> SecureEvaluation<Self> {
-        // todo!()
-        CpuBackend::accumulate_quotients(domain, columns, random_coeff, sample_batches)
-    }
+
 }
 
 // stwo/crates/prover/src/core/vcs/poseidon252_merkle.rs
@@ -248,7 +217,7 @@ use icicle_cuda_runtime::device::get_device_from_pointer;
 use icicle_cuda_runtime::device_context::DeviceContext;
 use icicle_cuda_runtime::memory::{DeviceSlice, DeviceVec, HostOrDeviceSlice, HostSlice};
 use icicle_cuda_runtime::stream::CudaStream;
-use icicle_m31::field::{ExtensionField, ScalarField};
+use icicle_m31::field::{QuarticExtensionField, ScalarField};
 
 impl SecureColumnByCoords<IcicleBackend> {
     // TODO: implement geneics
@@ -256,8 +225,8 @@ impl SecureColumnByCoords<IcicleBackend> {
         self.as_icicle_device_slice_mut::<ScalarField>()
     }
 
-    pub fn as_icicle_ext_slice_mut(&self) -> &mut DeviceSlice<ExtensionField> {
-        self.as_icicle_device_slice_mut::<ExtensionField>()
+    pub fn as_icicle_ext_slice_mut(&self) -> &mut DeviceSlice<QuarticExtensionField> {
+        self.as_icicle_device_slice_mut::<QuarticExtensionField>()
     }
 
     pub fn as_icicle_device_slice_mut<T>(&self) -> &mut DeviceSlice<T> {
@@ -277,7 +246,7 @@ impl SecureColumnByCoords<IcicleBackend> {
             let mut intermediate_host = vec![zero; 4 * n];
 
             // use std::ptr::from_raw_parts;
-            use crate::core::SecureField;
+            use crate::core::fields::qm31::SecureField;
             let cfg = VecOpsConfig::default();
 
             let a: &[u32] = unsafe { transmute(self.columns[0].as_slice()) };
@@ -290,7 +259,7 @@ impl SecureColumnByCoords<IcicleBackend> {
             let c = HostSlice::from_slice(&c);
             let d = HostSlice::from_slice(&d);
 
-            let mut col_a = ManuallyDrop::new(DeviceVec::<ExtensionField>::cuda_malloc(n).unwrap());
+            let mut col_a = ManuallyDrop::new(DeviceVec::<QuarticExtensionField>::cuda_malloc(n).unwrap());
 
             stwo_convert(a, b, c, d, &mut col_a[..]);
 
@@ -308,7 +277,7 @@ impl SecureColumnByCoords<IcicleBackend> {
             let secure_degree = self.columns.len();
             let mut intermediate_host = vec![zero; secure_degree * n];
 
-            use crate::core::SecureField;
+            use crate::core::fields::qm31::SecureField;
             let cfg = VecOpsConfig::default();
 
             let mut red_u32_d = self.as_icicle_slice_mut();

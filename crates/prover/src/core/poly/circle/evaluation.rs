@@ -5,7 +5,8 @@ use educe::Educe;
 
 use super::{CanonicCoset, CircleDomain, CirclePoly, PolyOps};
 use crate::core::backend::cpu::CpuCircleEvaluation;
-use crate::core::backend::{Col, Column};
+use crate::core::backend::simd::SimdBackend;
+use crate::core::backend::{Col, Column, CpuBackend};
 use crate::core::circle::{CirclePointIndex, Coset};
 use crate::core::fields::m31::BaseField;
 use crate::core::fields::{ExtensionOf, FieldOps};
@@ -36,8 +37,9 @@ impl<B: FieldOps<F>, F: ExtensionOf<BaseField>, EvalOrder> CircleEvaluation<B, F
 
 // Note: The concrete implementation of the poly operations is in the specific backend used.
 // For example, the CPU backend implementation is in `src/core/backend/cpu/poly.rs`.
+// TODO(first) Remove NaturalOrder.
 impl<F: ExtensionOf<BaseField>, B: FieldOps<F>> CircleEvaluation<B, F, NaturalOrder> {
-    // TODO(spapini): Remove. Is this even used.
+    // TODO(alont): Remove. Is this even used.
     pub fn get_at(&self, point_index: CirclePointIndex) -> F {
         self.values
             .at(self.domain.find(point_index).expect("Not in domain"))
@@ -104,6 +106,15 @@ impl<B: FieldOps<F>, F: ExtensionOf<BaseField>> CircleEvaluation<B, F, BitRevers
             self.domain.find(point_index).expect("Not in domain"),
             self.domain.log_size(),
         ))
+    }
+}
+
+impl<F: ExtensionOf<BaseField>, EvalOrder> CircleEvaluation<SimdBackend, F, EvalOrder>
+where
+    SimdBackend: FieldOps<F>,
+{
+    pub fn to_cpu(&self) -> CircleEvaluation<CpuBackend, F, EvalOrder> {
+        CircleEvaluation::new(self.domain, self.values.to_cpu())
     }
 }
 

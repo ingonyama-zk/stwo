@@ -1,50 +1,53 @@
 mod constraints;
 mod gen;
 
-use constraints::BlakeSchedulerEval;
+use constraints::eval_blake_scheduler_constraints;
 pub use gen::{gen_interaction_trace, gen_trace, BlakeInput};
 use num_traits::Zero;
 
 use super::round::RoundElements;
 use super::N_ROUND_INPUT_FELTS;
 use crate::constraint_framework::logup::{LogupAtRow, LookupElements};
-use crate::constraint_framework::{EvalAtRow, FrameworkComponent, InfoEvaluator};
+use crate::constraint_framework::{EvalAtRow, FrameworkComponent, FrameworkEval, InfoEvaluator};
 use crate::core::fields::qm31::SecureField;
+
+pub type BlakeSchedulerComponent = FrameworkComponent<BlakeSchedulerEval>;
 
 pub type BlakeElements = LookupElements<N_ROUND_INPUT_FELTS>;
 
-pub fn blake_scheduler_info() -> InfoEvaluator {
-    let component = BlakeSchedulerComponent {
-        log_size: 1,
-        blake_lookup_elements: BlakeElements::dummy(),
-        round_lookup_elements: RoundElements::dummy(),
-        claimed_sum: SecureField::zero(),
-    };
-    component.evaluate(InfoEvaluator::default())
-}
-
-pub struct BlakeSchedulerComponent {
+pub struct BlakeSchedulerEval {
     pub log_size: u32,
     pub blake_lookup_elements: BlakeElements,
     pub round_lookup_elements: RoundElements,
-    pub claimed_sum: SecureField,
+    pub total_sum: SecureField,
 }
-impl FrameworkComponent for BlakeSchedulerComponent {
+impl FrameworkEval for BlakeSchedulerEval {
     fn log_size(&self) -> u32 {
         self.log_size
     }
     fn max_constraint_log_degree_bound(&self) -> u32 {
         self.log_size + 1
     }
-    fn evaluate<E: EvalAtRow>(&self, eval: E) -> E {
-        let blake_eval = BlakeSchedulerEval {
-            eval,
-            blake_lookup_elements: &self.blake_lookup_elements,
-            round_lookup_elements: &self.round_lookup_elements,
-            logup: LogupAtRow::new(1, self.claimed_sum, self.log_size),
-        };
-        blake_eval.eval()
+    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+        let [is_first] = eval.next_interaction_mask(2, [0]);
+        eval_blake_scheduler_constraints(
+            &mut eval,
+            &self.blake_lookup_elements,
+            &self.round_lookup_elements,
+            LogupAtRow::new(1, self.total_sum, None, is_first),
+        );
+        eval
     }
+}
+
+pub fn blake_scheduler_info() -> InfoEvaluator {
+    let component = BlakeSchedulerEval {
+        log_size: 1,
+        blake_lookup_elements: BlakeElements::dummy(),
+        round_lookup_elements: RoundElements::dummy(),
+        total_sum: SecureField::zero(),
+    };
+    component.evaluate(InfoEvaluator::default())
 }
 
 #[cfg(test)]
@@ -53,11 +56,12 @@ mod tests {
 
     use itertools::Itertools;
 
-    use crate::constraint_framework::FrameworkComponent;
+    use crate::constraint_framework::constant_columns::gen_is_first;
+    use crate::constraint_framework::FrameworkEval;
     use crate::core::poly::circle::CanonicCoset;
     use crate::examples::blake::round::RoundElements;
     use crate::examples::blake::scheduler::r#gen::{gen_interaction_trace, gen_trace, BlakeInput};
-    use crate::examples::blake::scheduler::{BlakeElements, BlakeSchedulerComponent};
+    use crate::examples::blake::scheduler::{BlakeElements, BlakeSchedulerEval};
 
     #[test]
     fn test_blake_scheduler() {
@@ -77,21 +81,21 @@ mod tests {
 
         let round_lookup_elements = RoundElements::dummy();
         let blake_lookup_elements = BlakeElements::dummy();
-        let (interaction_trace, claimed_sum) = gen_interaction_trace(
+        let (interaction_trace, total_sum) = gen_interaction_trace(
             LOG_SIZE,
             lookup_data,
             &round_lookup_elements,
             &blake_lookup_elements,
         );
 
-        let trace = TreeVec::new(vec![trace, interaction_trace]);
+        let trace = TreeVec::new(vec![trace, interaction_trace, vec![gen_is_first(LOG_SIZE)]]);
         let trace_polys = trace.map_cols(|c| c.interpolate());
 
-        let component = BlakeSchedulerComponent {
+        let component = BlakeSchedulerEval {
             log_size: LOG_SIZE,
             blake_lookup_elements,
             round_lookup_elements,
-            claimed_sum,
+            total_sum,
         };
         crate::constraint_framework::assert_constraints(
             &trace_polys,

@@ -1,49 +1,52 @@
 mod constraints;
 mod gen;
 
-use constraints::BlakeRoundEval;
+pub use gen::{generate_interaction_trace, generate_trace, BlakeRoundInput};
 use num_traits::Zero;
-pub use r#gen::{generate_interaction_trace, generate_trace, BlakeRoundInput};
 
 use super::{BlakeXorElements, N_ROUND_INPUT_FELTS};
 use crate::constraint_framework::logup::{LogupAtRow, LookupElements};
-use crate::constraint_framework::{EvalAtRow, FrameworkComponent, InfoEvaluator};
+use crate::constraint_framework::{EvalAtRow, FrameworkComponent, FrameworkEval, InfoEvaluator};
 use crate::core::fields::qm31::SecureField;
 
-pub fn blake_round_info() -> InfoEvaluator {
-    let component = BlakeRoundComponent {
-        log_size: 1,
-        xor_lookup_elements: BlakeXorElements::dummy(),
-        round_lookup_elements: RoundElements::dummy(),
-        claimed_sum: SecureField::zero(),
-    };
-    component.evaluate(InfoEvaluator::default())
-}
+pub type BlakeRoundComponent = FrameworkComponent<BlakeRoundEval>;
 
 pub type RoundElements = LookupElements<N_ROUND_INPUT_FELTS>;
-pub struct BlakeRoundComponent {
+
+pub struct BlakeRoundEval {
     pub log_size: u32,
     pub xor_lookup_elements: BlakeXorElements,
     pub round_lookup_elements: RoundElements,
-    pub claimed_sum: SecureField,
+    pub total_sum: SecureField,
 }
 
-impl FrameworkComponent for BlakeRoundComponent {
+impl FrameworkEval for BlakeRoundEval {
     fn log_size(&self) -> u32 {
         self.log_size
     }
     fn max_constraint_log_degree_bound(&self) -> u32 {
         self.log_size + 1
     }
-    fn evaluate<E: EvalAtRow>(&self, eval: E) -> E {
-        let blake_eval = BlakeRoundEval {
+    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+        let [is_first] = eval.next_interaction_mask(2, [0]);
+        let blake_eval = constraints::BlakeRoundEval {
             eval,
             xor_lookup_elements: &self.xor_lookup_elements,
             round_lookup_elements: &self.round_lookup_elements,
-            logup: LogupAtRow::new(1, self.claimed_sum, self.log_size),
+            logup: LogupAtRow::new(1, self.total_sum, None, is_first),
         };
         blake_eval.eval()
     }
+}
+
+pub fn blake_round_info() -> InfoEvaluator {
+    let component = BlakeRoundEval {
+        log_size: 1,
+        xor_lookup_elements: BlakeXorElements::dummy(),
+        round_lookup_elements: RoundElements::dummy(),
+        total_sum: SecureField::zero(),
+    };
+    component.evaluate(InfoEvaluator::default())
 }
 
 #[cfg(test)]
@@ -53,12 +56,12 @@ mod tests {
     use itertools::Itertools;
 
     use crate::constraint_framework::constant_columns::gen_is_first;
-    use crate::constraint_framework::FrameworkComponent;
+    use crate::constraint_framework::FrameworkEval;
     use crate::core::poly::circle::CanonicCoset;
     use crate::examples::blake::round::r#gen::{
         generate_interaction_trace, generate_trace, BlakeRoundInput,
     };
-    use crate::examples::blake::round::{BlakeRoundComponent, RoundElements};
+    use crate::examples::blake::round::{BlakeRoundEval, RoundElements};
     use crate::examples::blake::{BlakeXorElements, XorAccums};
 
     #[test]
@@ -81,7 +84,7 @@ mod tests {
 
         let xor_lookup_elements = BlakeXorElements::dummy();
         let round_lookup_elements = RoundElements::dummy();
-        let (interaction_trace, claimed_sum) = generate_interaction_trace(
+        let (interaction_trace, total_sum) = generate_interaction_trace(
             LOG_SIZE,
             lookup_data,
             &xor_lookup_elements,
@@ -91,11 +94,11 @@ mod tests {
         let trace = TreeVec::new(vec![trace, interaction_trace, vec![gen_is_first(LOG_SIZE)]]);
         let trace_polys = trace.map_cols(|c| c.interpolate());
 
-        let component = BlakeRoundComponent {
+        let component = BlakeRoundEval {
             log_size: LOG_SIZE,
             xor_lookup_elements,
             round_lookup_elements,
-            claimed_sum,
+            total_sum,
         };
         crate::constraint_framework::assert_constraints(
             &trace_polys,

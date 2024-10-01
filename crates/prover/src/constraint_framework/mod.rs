@@ -2,6 +2,7 @@
 mod assert;
 mod component;
 pub mod constant_columns;
+mod cpu_domain;
 mod info;
 pub mod logup;
 mod point;
@@ -12,7 +13,7 @@ use std::fmt::Debug;
 use std::ops::{Add, AddAssign, Mul, Neg, Sub};
 
 pub use assert::{assert_constraints, AssertEvaluator};
-pub use component::FrameworkComponent;
+pub use component::{FrameworkComponent, FrameworkEval, TraceLocationAllocator};
 pub use info::InfoEvaluator;
 use num_traits::{One, Zero};
 pub use point::PointEvaluator;
@@ -25,16 +26,16 @@ use crate::core::fields::FieldExpOps;
 
 /// A trait for evaluating expressions at some point or row.
 pub trait EvalAtRow {
-    // TODO(spapini): Use a better trait for these, like 'Algebra' or something.
+    // TODO(Ohad): Use a better trait for these, like 'Algebra' or something.
     /// The field type holding values of columns for the component. These are the inputs to the
     /// constraints. It might be [BaseField] packed types, or even [SecureField], when evaluating
     /// the columns out of domain.
     type F: FieldExpOps
-        + Copy
+        + Clone
         + Debug
         + Zero
         + Neg<Output = Self::F>
-        + AddAssign<Self::F>
+        + AddAssign
         + AddAssign<BaseField>
         + Add<Self::F, Output = Self::F>
         + Sub<Self::F, Output = Self::F>
@@ -47,11 +48,12 @@ pub trait EvalAtRow {
     /// A field type representing the closure of `F` with multiplying by [SecureField]. Constraints
     /// usually get multiplied by [SecureField] values for security.
     type EF: One
-        + Copy
+        + Clone
         + Debug
         + Zero
         + From<Self::F>
         + Neg<Output = Self::EF>
+        + AddAssign
         + Add<SecureField, Output = Self::EF>
         + Sub<SecureField, Output = Self::EF>
         + Mul<SecureField, Output = Self::EF>
@@ -82,8 +84,11 @@ pub trait EvalAtRow {
         interaction: usize,
         offsets: [isize; N],
     ) -> [Self::EF; N] {
-        let res_col_major = array::from_fn(|_| self.next_interaction_mask(interaction, offsets));
-        array::from_fn(|i| Self::combine_ef(res_col_major.map(|c| c[i])))
+        let mut res_col_major =
+            array::from_fn(|_| self.next_interaction_mask(interaction, offsets).into_iter());
+        array::from_fn(|_| {
+            Self::combine_ef(res_col_major.each_mut().map(|iter| iter.next().unwrap()))
+        })
     }
 
     /// Adds a constraint to the component.

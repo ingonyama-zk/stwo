@@ -183,7 +183,7 @@ impl DerefMut for LinePoly {
 /// Evaluations of a univariate polynomial on a [LineDomain].
 // TODO(andrew): Remove EvalOrder. Bit-reversed evals are only necessary since LineEvaluation is
 // only used by FRI where evaluations are in bit-reversed order.
-// TODO(spapini): Remove pub.
+// TODO(andrew): Remove pub.
 #[derive(Clone, Debug)]
 pub struct LineEvaluation<B: FieldOps<BaseField>> {
     /// Evaluations of a univariate polynomial on `domain`.
@@ -258,7 +258,7 @@ impl LineEvaluation<CpuBackend> {
 /// # Panics
 ///
 /// Panics if the number of values doesn't match the size of the domain.
-fn line_ifft<F: ExtensionOf<BaseField>>(values: &mut [F], mut domain: LineDomain) {
+fn line_ifft<F: ExtensionOf<BaseField> + Copy>(values: &mut [F], mut domain: LineDomain) {
     assert_eq!(values.len(), domain.size());
     while domain.size() > 1 {
         for chunk in values.chunks_exact_mut(domain.size()) {
