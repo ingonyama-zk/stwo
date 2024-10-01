@@ -291,13 +291,10 @@ impl MerkleOps<Poseidon252MerkleHasher> for IcicleBackend {
         columns: &[&Col<Self, BaseField>],
     ) -> Col<Self, <Poseidon252MerkleHasher as MerkleHasher>::Hash> {
         // todo!()
-        unsafe {
-            transmute(
-                <CpuBackend as MerkleOps<Poseidon252MerkleHasher>>::commit_on_layer(
-                    log_size, prev_layer, columns,
-                ),
-            )
-        }
+
+        <CpuBackend as MerkleOps<Poseidon252MerkleHasher>>::commit_on_layer(
+            log_size, prev_layer, columns,
+        )
     }
 }
 
