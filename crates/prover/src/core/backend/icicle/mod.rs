@@ -376,11 +376,11 @@ mod tests {
     use std::iter::zip;
 
     use num_traits::One;
-    use crate::core::poly::circle::CirclePoly;
+    use crate::core::poly::circle::{CircleEvaluation, CirclePoly};
     use crate::core::backend::icicle::IcicleBackend;
 
     type IcicleCirclePoly = CirclePoly<IcicleBackend>;
-    // type CpuCircleEvaluation<F, EvalOrder> = CircleEvaluation<CpuBackend, F, EvalOrder>;
+    type IcicleCircleEvaluation<F, EvalOrder> = CircleEvaluation<IcicleBackend, F, EvalOrder>;
     // type CpuMle<F> = Mle<CpuBackend, F>;
 
     use crate::core::backend::cpu::CpuCirclePoly;
@@ -499,6 +499,17 @@ mod tests {
         let interpolated_poly = evals.interpolate();
 
         assert_eq!(interpolated_poly.coeffs, poly.coeffs);
+    }
+
+    #[test]
+    fn test_icicle_interpolate_and_eval() {
+        let domain = CanonicCoset::new(3).circle_domain();
+        assert_eq!(domain.log_size(), 3);
+        let evaluation =
+        IcicleCircleEvaluation::new(domain, (0..8).map(BaseField::from_u32_unchecked).collect());
+        let poly = evaluation.clone().interpolate();
+        let evaluation2 = poly.evaluate(domain);
+        assert_eq!(evaluation.values, evaluation2.values);
     }
 
     /*
