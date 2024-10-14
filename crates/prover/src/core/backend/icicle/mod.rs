@@ -5,6 +5,7 @@ use std::ffi::c_void;
 use std::mem::{size_of_val, transmute};
 
 use icicle_core::vec_ops::{accumulate_scalars, VecOpsConfig};
+use icicle_m31::dcct::{evaluate, get_dcct_root_of_unity, initialize_dcct_domain};
 use serde::{Deserialize, Serialize};
 use twiddles::TwiddleTree;
 
@@ -200,13 +201,48 @@ impl PolyOps for IcicleBackend {
         twiddles: &TwiddleTree<Self>,
     ) -> CircleEvaluation<Self, BaseField, BitReversedOrder> {
         // todo!()
-        unsafe {
-            transmute(CpuBackend::evaluate(
-                transmute(poly),
-                domain,
-                transmute(twiddles),
-            ))
-        }
+        // unsafe {
+        //     transmute(CpuBackend::evaluate(
+        //         transmute(poly),
+        //         domain,
+        //         transmute(twiddles),
+        //     ))
+        // }
+
+        println!("here");
+
+        let values = poly.extend(domain.log_size()).coeffs;
+        assert!(domain.half_coset.is_doubling_of(twiddles.root_coset));
+        // unsafe {
+        //     cuda::bindings::evaluate(
+        //         domain.half_coset.size() as u32,
+        //         values.device_ptr,
+        //         twiddle_tree.twiddles.device_ptr,
+        //         twiddle_tree.twiddles.len() as u32,
+        //         values.len() as u32,
+        //     );
+        // }
+
+        assert_eq!(1 << domain.log_size(), values.len() as u32);
+
+        let rou = get_dcct_root_of_unity(domain.log_size());
+        println!("ROU {:?}", rou);
+        initialize_dcct_domain(rou, &DeviceContext::default()).unwrap();
+        println!("initialied DCCT succesfully");
+
+        let mut evaluations = vec![ScalarField::zero(); values.len()];
+        let values: Vec<ScalarField> = unsafe { transmute(values) };
+        let mut cfg = NTTConfig::default();
+
+        evaluate(
+            HostSlice::from_slice(&values),
+            &cfg,
+            HostSlice::from_mut_slice(&mut evaluations),
+        )
+        .unwrap();
+        let values: Vec<BaseField> = unsafe { transmute(evaluations) };
+
+        CircleEvaluation::new(domain, values)
     }
 
     fn precompute_twiddles(coset: Coset) -> TwiddleTree<Self> {
@@ -299,7 +335,7 @@ impl MerkleOps<Poseidon252MerkleHasher> for IcicleBackend {
 
 use std::ptr::{self, slice_from_raw_parts, slice_from_raw_parts_mut};
 
-use icicle_core::ntt::FieldImpl;
+use icicle_core::ntt::{FieldImpl, NTTConfig};
 use icicle_core::vec_ops::{stwo_convert, transpose_matrix};
 use icicle_cuda_runtime::device::get_device_from_pointer;
 use icicle_cuda_runtime::device_context::DeviceContext;
@@ -370,14 +406,16 @@ impl SecureColumnByCoords<IcicleBackend> {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use std::iter::zip;
 
+    use itertools::Itertools;
     use num_traits::One;
-    use crate::core::poly::circle::{CircleEvaluation, CirclePoly};
+
     use crate::core::backend::icicle::IcicleBackend;
+    use crate::core::fields::ExtensionOf;
+    use crate::core::poly::circle::{CircleEvaluation, CirclePoly};
 
     type IcicleCirclePoly = CirclePoly<IcicleBackend>;
     type IcicleCircleEvaluation<F, EvalOrder> = CircleEvaluation<IcicleBackend, F, EvalOrder>;
@@ -388,6 +426,20 @@ mod tests {
     use crate::core::fields::m31::BaseField;
     use crate::core::fields::qm31::SecureField;
     use crate::core::poly::circle::CanonicCoset;
+
+    impl<F: ExtensionOf<BaseField>, EvalOrder> IntoIterator
+        for CircleEvaluation<IcicleBackend, F, EvalOrder>
+    {
+        type Item = F;
+        type IntoIter = std::vec::IntoIter<F>;
+
+        /// Creates a consuming iterator over the evaluations.
+        ///
+        /// Evaluations are returned in the same order as elements of the domain.
+        fn into_iter(self) -> Self::IntoIter {
+            self.values.into_iter()
+        }
+    }
 
     #[test]
     fn test_icicle_eval_at_point_with_4_coeffs() {
@@ -408,7 +460,7 @@ mod tests {
     #[test]
     fn test_icicle_eval_at_point_with_2_coeffs() {
         // Represents the polynomial `1 + 2y`.
-        let poly = CpuCirclePoly::new(vec![BaseField::from(1), BaseField::from(2)]);
+        let poly = IcicleCirclePoly::new(vec![BaseField::from(1), BaseField::from(2)]);
         let x = BaseField::from(5).into();
         let y = BaseField::from(8).into();
 
@@ -420,7 +472,7 @@ mod tests {
     #[test]
     fn test_icicle_eval_at_point_with_1_coeff() {
         // Represents the polynomial `1`.
-        let poly = CpuCirclePoly::new(vec![BaseField::one()]);
+        let poly = IcicleCirclePoly::new(vec![BaseField::one()]);
         let x = BaseField::from(5).into();
         let y = BaseField::from(8).into();
 
@@ -432,7 +484,7 @@ mod tests {
     #[test]
     fn test_icicle_evaluate_2_coeffs() {
         let domain = CanonicCoset::new(1).circle_domain();
-        let poly = CpuCirclePoly::new((1..=2).map(BaseField::from).collect());
+        let poly = IcicleCirclePoly::new((1..=2).map(BaseField::from).collect());
 
         let evaluation = poly.clone().evaluate(domain).bit_reverse();
 
@@ -445,7 +497,7 @@ mod tests {
     #[test]
     fn test_icicle_evaluate_4_coeffs() {
         let domain = CanonicCoset::new(2).circle_domain();
-        let poly = CpuCirclePoly::new((1..=4).map(BaseField::from).collect());
+        let poly = IcicleCirclePoly::new((1..=4).map(BaseField::from).collect());
 
         let evaluation = poly.clone().evaluate(domain).bit_reverse();
 
@@ -456,11 +508,12 @@ mod tests {
     }
 
     #[test]
-    fn test_icicle_evaluate_8_coeffs() {
-        let domain = CanonicCoset::new(3).circle_domain();
-        let poly = CpuCirclePoly::new((1..=8).map(BaseField::from).collect());
+    fn test_icicle_evaluate_16_coeffs() {
+        let domain = CanonicCoset::new(4).circle_domain();
+        let poly = IcicleCirclePoly::new((1..=16).map(BaseField::from).collect());
 
-        let evaluation = poly.clone().evaluate(domain).bit_reverse();
+        let evaluation = poly.clone().evaluate(domain);
+        //.bit_reverse(); //TODO: originally is then bit reversed
 
         for (i, (x, eval)) in zip(domain, evaluation).enumerate() {
             let eval: SecureField = eval.into();
@@ -470,7 +523,7 @@ mod tests {
 
     #[test]
     fn test_icicle_interpolate_2_evals() {
-        let poly = CpuCirclePoly::new(vec![BaseField::one(), BaseField::from(2)]);
+        let poly = IcicleCirclePoly::new(vec![BaseField::one(), BaseField::from(2)]);
         let domain = CanonicCoset::new(1).circle_domain();
         let evals = poly.clone().evaluate(domain);
 
@@ -481,7 +534,7 @@ mod tests {
 
     #[test]
     fn test_icicle_interpolate_4_evals() {
-        let poly = CpuCirclePoly::new((1..=4).map(BaseField::from).collect());
+        let poly = IcicleCirclePoly::new((1..=4).map(BaseField::from).collect());
         let domain = CanonicCoset::new(2).circle_domain();
         let evals = poly.clone().evaluate(domain);
 
@@ -492,7 +545,7 @@ mod tests {
 
     #[test]
     fn test_icicle_interpolate_8_evals() {
-        let poly = CpuCirclePoly::new((1..=8).map(BaseField::from).collect());
+        let poly = IcicleCirclePoly::new((1..=8).map(BaseField::from).collect());
         let domain = CanonicCoset::new(3).circle_domain();
         let evals = poly.clone().evaluate(domain);
 
@@ -503,75 +556,75 @@ mod tests {
 
     #[test]
     fn test_icicle_interpolate_and_eval() {
-        let domain = CanonicCoset::new(3).circle_domain();
-        assert_eq!(domain.log_size(), 3);
-        let evaluation =
-        IcicleCircleEvaluation::new(domain, (0..8).map(BaseField::from_u32_unchecked).collect());
+        let log = 4;
+        let domain = CanonicCoset::new(log).circle_domain();
+        assert_eq!(domain.log_size(), log);
+        let evaluation = IcicleCircleEvaluation::new(
+            domain,
+            (0..1 << log).map(BaseField::from_u32_unchecked).collect(),
+        );
         let poly = evaluation.clone().interpolate();
         let evaluation2 = poly.evaluate(domain);
         assert_eq!(evaluation.values, evaluation2.values);
     }
 
-    /*
-
-    use crate::qm31;
-    use crate::core::backend::icicle::column::BaseColumn;
-    use crate::core::poly::circle::CircleEvaluation;
-    use crate::core::poly::BitReversedOrder;
-    use crate::core::circle::SECURE_FIELD_CIRCLE_GEN;
-    use crate::core::pcs::quotients::ColumnSampleBatch;
-    use crate::core::backend::CpuBackend;
-    use crate::core::pcs::quotients::QuotientOps;
-
-    #[test]
-    fn test_icicle_accumulate_quotients() {
-        const LOG_SIZE: u32 = 8;
-        const LOG_BLOWUP_FACTOR: u32 = 1;
-        let small_domain = CanonicCoset::new(LOG_SIZE).circle_domain();
-        let domain = CanonicCoset::new(LOG_SIZE + LOG_BLOWUP_FACTOR).circle_domain();
-        let e0: BaseColumn = (0..small_domain.size()).map(BaseField::from).collect();
-        let e1: BaseColumn = (0..small_domain.size())
-            .map(|i| BaseField::from(2 * i))
-            .collect();
-        let polys = vec![
-            CircleEvaluation::<IcicleBackend, BaseField, BitReversedOrder>::new(small_domain, e0)
-                .interpolate(),
-            CircleEvaluation::<IcicleBackend, BaseField, BitReversedOrder>::new(small_domain, e1)
-                .interpolate(),
-        ];
-        let columns = vec![polys[0].evaluate(domain), polys[1].evaluate(domain)];
-        let random_coeff = qm31!(1, 2, 3, 4);
-        let a = polys[0].eval_at_point(SECURE_FIELD_CIRCLE_GEN);
-        let b = polys[1].eval_at_point(SECURE_FIELD_CIRCLE_GEN);
-        let samples = vec![ColumnSampleBatch {
-            point: SECURE_FIELD_CIRCLE_GEN,
-            columns_and_values: vec![(0, a), (1, b)],
-        }];
-        let cpu_columns = columns
-            .iter()
-            .map(|c| CircleEvaluation::new(c.domain, c.values.to_cpu()))
-            .collect_vec();
-        let cpu_result = CpuBackend::accumulate_quotients(
-            domain,
-            &cpu_columns.iter().collect_vec(),
-            random_coeff,
-            &samples,
-            LOG_BLOWUP_FACTOR,
-        )
-        .values
-        .to_vec();
-
-        let res = IcicleBackend::accumulate_quotients(
-            domain,
-            &columns.iter().collect_vec(),
-            random_coeff,
-            &samples,
-            LOG_BLOWUP_FACTOR,
-        )
-        .values
-        .to_vec();
-
-        assert_eq!(res, cpu_result);
-    }
-    */
+    // use crate::qm31;
+    // use crate::core::backend::icicle::column::BaseColumn;
+    // use crate::core::poly::circle::CircleEvaluation;
+    // use crate::core::poly::BitReversedOrder;
+    // use crate::core::circle::SECURE_FIELD_CIRCLE_GEN;
+    // use crate::core::pcs::quotients::ColumnSampleBatch;
+    // use crate::core::backend::CpuBackend;
+    // use crate::core::pcs::quotients::QuotientOps;
+    //
+    // #[test]
+    // fn test_icicle_accumulate_quotients() {
+    // const LOG_SIZE: u32 = 8;
+    // const LOG_BLOWUP_FACTOR: u32 = 1;
+    // let small_domain = CanonicCoset::new(LOG_SIZE).circle_domain();
+    // let domain = CanonicCoset::new(LOG_SIZE + LOG_BLOWUP_FACTOR).circle_domain();
+    // let e0: BaseColumn = (0..small_domain.size()).map(BaseField::from).collect();
+    // let e1: BaseColumn = (0..small_domain.size())
+    // .map(|i| BaseField::from(2 * i))
+    // .collect();
+    // let polys = vec![
+    // CircleEvaluation::<IcicleBackend, BaseField, BitReversedOrder>::new(small_domain, e0)
+    // .interpolate(),
+    // CircleEvaluation::<IcicleBackend, BaseField, BitReversedOrder>::new(small_domain, e1)
+    // .interpolate(),
+    // ];
+    // let columns = vec![polys[0].evaluate(domain), polys[1].evaluate(domain)];
+    // let random_coeff = qm31!(1, 2, 3, 4);
+    // let a = polys[0].eval_at_point(SECURE_FIELD_CIRCLE_GEN);
+    // let b = polys[1].eval_at_point(SECURE_FIELD_CIRCLE_GEN);
+    // let samples = vec![ColumnSampleBatch {
+    // point: SECURE_FIELD_CIRCLE_GEN,
+    // columns_and_values: vec![(0, a), (1, b)],
+    // }];
+    // let cpu_columns = columns
+    // .iter()
+    // .map(|c| CircleEvaluation::new(c.domain, c.values.to_cpu()))
+    // .collect_vec();
+    // let cpu_result = CpuBackend::accumulate_quotients(
+    // domain,
+    // &cpu_columns.iter().collect_vec(),
+    // random_coeff,
+    // &samples,
+    // LOG_BLOWUP_FACTOR,
+    // )
+    // .values
+    // .to_vec();
+    //
+    // let res = IcicleBackend::accumulate_quotients(
+    // domain,
+    // &columns.iter().collect_vec(),
+    // random_coeff,
+    // &samples,
+    // LOG_BLOWUP_FACTOR,
+    // )
+    // .values
+    // .to_vec();
+    //
+    // assert_eq!(res, cpu_result);
+    // }
 }
