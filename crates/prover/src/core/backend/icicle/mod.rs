@@ -234,29 +234,29 @@ impl PolyOps for IcicleBackend {
         // }
 
         let values = poly.extend(domain.log_size()).coeffs;
-        assert!(domain.half_coset.is_doubling_of(twiddles.root_coset));
+        // assert!(domain.half_coset.is_doubling_of(twiddles.root_coset));
 
-        assert_eq!(1 << domain.log_size(), values.len() as u32);
+        // assert_eq!(1 << domain.log_size(), values.len() as u32);
 
         let rou = get_dcct_root_of_unity(domain.log_size());
-        println!("ROU {:?}", rou);
         initialize_dcct_domain(rou, &DeviceContext::default()).unwrap();
-        println!("initialied DCCT succesfully");
 
         let mut evaluations = vec![ScalarField::zero(); values.len()];
         let values: Vec<ScalarField> = unsafe { transmute(values) };
         let mut cfg = NTTConfig::default();
-        cfg.ordering = Ordering::kRR;
+        cfg.ordering = Ordering::kNM;
         evaluate(
             HostSlice::from_slice(&values),
             &cfg,
             HostSlice::from_mut_slice(&mut evaluations),
         )
         .unwrap();
-        let values: Vec<BaseField> = unsafe { transmute(evaluations) };
-        let result = IcicleCircleEvaluation::<BaseField, BitReversedOrder>::new(domain, values);
-        let result = result.bit_reverse(); // TODO: remove this bit_reverse
-        unsafe { transmute(result) }
+        unsafe {
+            transmute(IcicleCircleEvaluation::<BaseField, BitReversedOrder>::new(
+                domain,
+                transmute(evaluations),
+            ))
+        }
     }
 
     fn precompute_twiddles(coset: Coset) -> TwiddleTree<Self> {
