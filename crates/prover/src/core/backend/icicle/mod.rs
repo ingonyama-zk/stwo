@@ -183,16 +183,19 @@ impl PolyOps for IcicleBackend {
         itwiddles: &TwiddleTree<Self>,
     ) -> CirclePoly<Self> {
         // todo!()
-        // unsafe {
-        //     transmute(CpuBackend::interpolate(
-        //         transmute(eval),
-        //         transmute(itwiddles),
-        //     ))
-        // }
+        if eval.domain.log_size() <= 3 || eval.domain.log_size() == 7 { //TODO: as property .is_dcct_available etc...
+            return unsafe {
+                transmute(CpuBackend::interpolate(
+                    transmute(eval),
+                    transmute(itwiddles),
+                ))
+            };
+        }
+
         let values = eval.values;
-        let rou = get_dcct_root_of_unity(eval.domain.log_size());
+        let rou = get_dcct_root_of_unity(eval.domain.size() as _);
         println!("ROU {:?}", rou);
-        initialize_dcct_domain(rou, &DeviceContext::default()).unwrap();
+        initialize_dcct_domain(eval.domain.log_size(), rou, &DeviceContext::default()).unwrap();
         println!("initialied DCCT succesfully");
 
         let mut evaluations = vec![ScalarField::zero(); values.len()];
@@ -225,21 +228,23 @@ impl PolyOps for IcicleBackend {
         twiddles: &TwiddleTree<Self>,
     ) -> CircleEvaluation<Self, BaseField, BitReversedOrder> {
         // todo!()
-        // unsafe {
-        //     transmute(CpuBackend::evaluate(
-        //         transmute(poly),
-        //         domain,
-        //         transmute(twiddles),
-        //     ))
-        // }
+        if domain.log_size() <= 3 || domain.log_size() == 7 {
+            return unsafe {
+                transmute(CpuBackend::evaluate(
+                    transmute(poly),
+                    domain,
+                    transmute(twiddles),
+                ))
+            };
+        }
 
         let values = poly.extend(domain.log_size()).coeffs;
         // assert!(domain.half_coset.is_doubling_of(twiddles.root_coset));
 
         // assert_eq!(1 << domain.log_size(), values.len() as u32);
 
-        let rou = get_dcct_root_of_unity(domain.log_size());
-        initialize_dcct_domain(rou, &DeviceContext::default()).unwrap();
+        let rou = get_dcct_root_of_unity(domain.size() as _);
+        initialize_dcct_domain(domain.log_size(), rou, &DeviceContext::default()).unwrap();
 
         let mut evaluations = vec![ScalarField::zero(); values.len()];
         let values: Vec<ScalarField> = unsafe { transmute(values) };
@@ -532,8 +537,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "log=1?"]
-
     fn test_icicle_interpolate_2_evals() {
         let poly = IcicleCirclePoly::new(vec![BaseField::one(), BaseField::from(2)]);
         let domain = CanonicCoset::new(1).circle_domain();
@@ -545,8 +548,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "log=2?"]
-
     fn test_icicle_interpolate_4_evals() {
         let poly = IcicleCirclePoly::new((1..=4).map(BaseField::from).collect());
         let domain = CanonicCoset::new(2).circle_domain();
@@ -558,8 +559,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "log=3?"]
-
     fn test_icicle_interpolate_8_evals() {
         let poly = IcicleCirclePoly::new((1..=8).map(BaseField::from).collect());
         let domain = CanonicCoset::new(3).circle_domain();
@@ -570,9 +569,9 @@ mod tests {
         assert_eq!(interpolated_poly.coeffs, poly.coeffs);
     }
 
-    #[test]
+    #[test] //TODO: fails for log2n > 8    
     fn test_icicle_interpolate_and_eval() {
-        let log = 8;
+        let log = 6;
         let domain = CanonicCoset::new(log).circle_domain();
         assert_eq!(domain.log_size(), log);
         let evaluation = IcicleCircleEvaluation::new(

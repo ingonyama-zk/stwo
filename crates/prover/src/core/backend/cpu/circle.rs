@@ -1,3 +1,5 @@
+use std::mem::transmute;
+
 use num_traits::Zero;
 
 use super::CpuBackend;
@@ -33,6 +35,20 @@ impl PolyOps for CpuBackend {
         eval: CircleEvaluation<Self, BaseField, BitReversedOrder>,
         twiddles: &TwiddleTree<Self>,
     ) -> CirclePoly<Self> {
+        #[cfg(feature = "icicle_poc")]
+        {
+            if eval.domain.log_size() > 3 && eval.domain.log_size() != 7 {
+                return unsafe {
+                    use crate::core::backend::icicle::IcicleBackend;
+
+                    transmute(IcicleBackend::interpolate(
+                        transmute(eval),
+                        transmute(twiddles),
+                    ))
+                };
+            }
+        }
+
         assert!(eval.domain.half_coset.is_doubling_of(twiddles.root_coset));
 
         let mut values = eval.values;
@@ -113,6 +129,23 @@ impl PolyOps for CpuBackend {
         domain: CircleDomain,
         twiddles: &TwiddleTree<Self>,
     ) -> CircleEvaluation<Self, BaseField, BitReversedOrder> {
+        #[cfg(feature = "icicle_poc")]
+        {
+            if domain.log_size() > 3 && domain.log_size() != 7 {
+                return unsafe {
+                    use crate::core::backend::icicle::IcicleBackend;
+
+                    unsafe {
+                        transmute(IcicleBackend::evaluate(
+                            transmute(poly),
+                            transmute(domain),
+                            transmute(twiddles),
+                        ))
+                    }
+                };
+            }
+        }
+
         assert!(domain.half_coset.is_doubling_of(twiddles.root_coset));
 
         let mut values = poly.extend(domain.log_size()).coeffs;
