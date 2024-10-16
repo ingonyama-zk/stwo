@@ -198,7 +198,7 @@ impl PolyOps for IcicleBackend {
         let mut evaluations = vec![ScalarField::zero(); values.len()];
         let values: Vec<ScalarField> = unsafe { transmute(values) };
         let mut cfg = NTTConfig::default();
-        // cfg.ordering = Ordering::kRR; //TODO: ordering seems doesn't work for dcct
+        cfg.ordering = Ordering::kNN; // same as default here anyway
         interpolate(
             HostSlice::from_slice(&values),
             &cfg,
@@ -572,7 +572,7 @@ mod tests {
 
     #[test]
     fn test_icicle_interpolate_and_eval() {
-        let log = 4;
+        let log = 8;
         let domain = CanonicCoset::new(log).circle_domain();
         assert_eq!(domain.log_size(), log);
         let evaluation = IcicleCircleEvaluation::new(
