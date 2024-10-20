@@ -496,7 +496,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "log=1?"]
     fn test_icicle_evaluate_2_coeffs() {
         let domain = CanonicCoset::new(1).circle_domain();
         let poly = IcicleCirclePoly::new((1..=2).map(BaseField::from).collect());
@@ -510,8 +509,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "log=2?"]
-
     fn test_icicle_evaluate_4_coeffs() {
         let domain = CanonicCoset::new(2).circle_domain();
         let poly = IcicleCirclePoly::new((1..=4).map(BaseField::from).collect());
