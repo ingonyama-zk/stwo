@@ -183,7 +183,8 @@ impl PolyOps for IcicleBackend {
         itwiddles: &TwiddleTree<Self>,
     ) -> CirclePoly<Self> {
         // todo!()
-        if eval.domain.log_size() <= 3 || eval.domain.log_size() == 7 { //TODO: as property .is_dcct_available etc...
+        if eval.domain.log_size() <= 3 || eval.domain.log_size() == 7 {
+            // TODO: as property .is_dcct_available etc...
             return unsafe {
                 transmute(CpuBackend::interpolate(
                     transmute(eval),
@@ -201,7 +202,7 @@ impl PolyOps for IcicleBackend {
         let mut evaluations = vec![ScalarField::zero(); values.len()];
         let values: Vec<ScalarField> = unsafe { transmute(values) };
         let mut cfg = NTTConfig::default();
-        cfg.ordering = Ordering::kNN; // same as default here anyway
+        cfg.ordering = Ordering::kMN;
         interpolate(
             HostSlice::from_slice(&values),
             &cfg,
@@ -569,18 +570,19 @@ mod tests {
         assert_eq!(interpolated_poly.coeffs, poly.coeffs);
     }
 
-    #[test] //TODO: fails for log2n > 8    
+    #[test]
     fn test_icicle_interpolate_and_eval() {
-        let log = 6;
-        let domain = CanonicCoset::new(log).circle_domain();
-        assert_eq!(domain.log_size(), log);
-        let evaluation = IcicleCircleEvaluation::new(
-            domain,
-            (0..1 << log).map(BaseField::from_u32_unchecked).collect(),
-        );
-        let poly = evaluation.clone().interpolate();
-        let evaluation2 = poly.evaluate(domain);
-        assert_eq!(evaluation.values, evaluation2.values);
+        for log in (4..6).chain(8..25) {
+            let domain = CanonicCoset::new(log).circle_domain();
+            assert_eq!(domain.log_size(), log);
+            let evaluation = IcicleCircleEvaluation::new(
+                domain,
+                (0..1 << log).map(BaseField::from_u32_unchecked).collect(),
+            );
+            let poly = evaluation.clone().interpolate();
+            let evaluation2 = poly.evaluate(domain);
+            assert_eq!(evaluation.values, evaluation2.values);
+        }
     }
 
     // use crate::qm31;
