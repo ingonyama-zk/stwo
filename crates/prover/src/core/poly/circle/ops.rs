@@ -75,3 +75,67 @@ pub trait PolyOps: FieldOps<BaseField> + Sized {
     /// Precomputes twiddles for a given coset.
     fn precompute_twiddles(coset: Coset) -> TwiddleTree<Self>;
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::core::backend::CpuBackend;
+    use crate::core::fields::m31::BaseField;
+    use crate::core::poly::circle::{CanonicCoset, PolyOps};
+
+    #[cfg(feature = "icicle_poc")]
+    #[test]
+    fn test_evaluate_polynomials() {
+        use itertools::Itertools;
+
+        use crate::core::{backend::{icicle::IcicleBackend, Column}, ColumnVec};
+
+        let log_size = 9;
+        let log2_cols = 8;
+        let log_blowup_factor = 2;
+
+        let size = 1 << log_size;
+        let n_cols = 1 << log2_cols;
+
+        let cpu_vals = (1..(size + 1) as u32)
+            .map(BaseField::from)
+            .collect::<Vec<_>>();
+        let gpu_vals = cpu_vals.clone();
+
+        let trace_coset = CanonicCoset::new(log_size);
+        let cpu_evals = CpuBackend::new_canonical_ordered(trace_coset, cpu_vals);
+        let gpu_evals = IcicleBackend::new_canonical_ordered(trace_coset, gpu_vals);
+
+        let interpolation_coset = CanonicCoset::new(log_size + log_blowup_factor);
+        let cpu_twiddles = CpuBackend::precompute_twiddles(interpolation_coset.half_coset());
+        let gpu_twiddles = IcicleBackend::precompute_twiddles(interpolation_coset.half_coset());
+
+        let cpu_poly = CpuBackend::interpolate(cpu_evals, &cpu_twiddles);
+        let gpu_poly = IcicleBackend::interpolate(gpu_evals, &gpu_twiddles);
+
+        let mut cpu_cols = ColumnVec::from(
+            (0..n_cols)
+                .map(|_| cpu_poly.clone())
+                .collect_vec(),
+        );
+        let mut gpu_cols = ColumnVec::from(
+            (0..n_cols)
+                .map(|_| gpu_poly.clone())
+                .collect_vec(),
+        );
+
+        let result = IcicleBackend::evaluate_polynomials(&mut gpu_cols, log_blowup_factor, &gpu_twiddles);
+        let expected_result =
+            CpuBackend::evaluate_polynomials(&mut cpu_cols, log_blowup_factor, &cpu_twiddles);
+
+        let expected_vals = expected_result
+            .iter()
+            .map(|eval| eval.clone().values)
+            .collect_vec();
+        let icicle_vals = result
+            .iter()
+            .map(|eval| eval.clone().values.to_cpu())
+            .collect_vec();
+
+        assert_eq!(icicle_vals, expected_vals);
+    }
+}

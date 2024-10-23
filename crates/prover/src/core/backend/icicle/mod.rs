@@ -6,6 +6,7 @@ use std::mem::{size_of_val, transmute};
 
 use icicle_core::vec_ops::{accumulate_scalars, VecOpsConfig};
 use icicle_m31::dcct::{evaluate, get_dcct_root_of_unity, initialize_dcct_domain, interpolate};
+use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use twiddles::TwiddleTree;
 
@@ -31,6 +32,7 @@ use crate::core::proof_of_work::GrindOps;
 use crate::core::vcs::blake2_merkle::{Blake2sMerkleChannel, Blake2sMerkleHasher};
 use crate::core::vcs::ops::{MerkleHasher, MerkleOps};
 use crate::core::vcs::poseidon252_merkle::{Poseidon252MerkleChannel, Poseidon252MerkleHasher};
+use crate::core::ColumnVec;
 #[derive(Copy, Clone, Debug, Deserialize, Serialize, Default)]
 pub struct IcicleBackend;
 
@@ -263,6 +265,107 @@ impl PolyOps for IcicleBackend {
                 transmute(evaluations),
             ))
         }
+    }
+
+    fn interpolate_columns(
+        columns: impl IntoIterator<Item = CircleEvaluation<Self, BaseField, BitReversedOrder>>,
+        twiddles: &TwiddleTree<Self>,
+    ) -> Vec<CirclePoly<Self>> {
+        // columns
+        //     .into_iter()
+        //     .map(|eval| eval.interpolate_with_twiddles(twiddles))
+        //     .collect()
+
+        let mut result = Vec::new();
+        let values: Vec<Vec<_>> = columns.into_iter().map(|eval| eval.values).collect();
+        let domain_size = values[0].len();
+        let domain_size_log2 = (domain_size as f64).log2() as u32;
+        let batch_size = values.len();
+        let ctx = DeviceContext::default();
+        let rou = get_dcct_root_of_unity(domain_size as _);
+        initialize_dcct_domain(domain_size_log2, rou, &ctx).unwrap();
+        // assuming this is always evenly-sized batch m x n
+
+        let mut result_tr: DeviceVec<ScalarField> =
+            DeviceVec::cuda_malloc(domain_size * batch_size).unwrap();
+        let mut evaluations_batch = vec![ScalarField::zero(); domain_size * batch_size];
+
+        let mut res_host = HostSlice::from_mut_slice(&mut evaluations_batch[..]);
+        // result_tr.copy_to_host(res_host).unwrap();
+
+        // non-contiguous memory on host
+        let evals: Vec<Vec<ScalarField>> = unsafe { transmute(values) };
+
+        // contiguous memory on device
+        result_tr
+            .copy_from_host_slice_vec_async(&evals, &ctx.stream)
+            .unwrap();
+
+        ctx.stream.synchronize().unwrap();
+
+        let mut cfg = NTTConfig::default();
+        cfg.batch_size = batch_size as _;
+        cfg.ordering = Ordering::kNM;
+        evaluate(&result_tr[..], &cfg, res_host).unwrap();
+        for i in 0..batch_size {
+            result.push(CirclePoly::new(unsafe {
+                transmute(res_host.as_slice()[i * domain_size..(i + 1) * domain_size].to_vec())
+            }));
+        }
+
+        result
+    }
+
+    fn evaluate_polynomials(
+        polynomials: &mut ColumnVec<CirclePoly<Self>>,
+        log_blowup_factor: u32,
+        twiddles: &TwiddleTree<Self>,
+    ) -> Vec<CircleEvaluation<Self, BaseField, BitReversedOrder>> {
+        let mut result = Vec::new();
+        let domain =
+            CanonicCoset::new(polynomials[0].log_size() + log_blowup_factor).circle_domain();
+        let rou = get_dcct_root_of_unity(domain.size() as _);
+        let domain_size = 1 << domain.log_size();
+        let batch_size = polynomials.len();
+        let ctx = DeviceContext::default();
+        initialize_dcct_domain(domain.log_size(), rou, &ctx).unwrap();
+        // assuming this is always evenly-sized batch m x n
+
+        let mut result_tr: DeviceVec<ScalarField> =
+            DeviceVec::cuda_malloc(domain_size * batch_size).unwrap();
+        let mut evaluations_batch = vec![ScalarField::zero(); domain_size * batch_size];
+
+        let mut res_host = HostSlice::from_mut_slice(&mut evaluations_batch[..]);
+        // result_tr.copy_to_host(res_host).unwrap();
+
+        // non-contiguous memory on host
+        let vals_extended = polynomials
+            .iter()
+            .map(|poly| poly.extend(domain.log_size()).coeffs)
+            .collect_vec();
+        let evals: Vec<Vec<ScalarField>> = unsafe { transmute(vals_extended) };
+
+        // contiguous memory on device
+        result_tr
+            .copy_from_host_slice_vec_async(&evals, &ctx.stream)
+            .unwrap();
+
+        ctx.stream.synchronize().unwrap();
+
+        let mut cfg = NTTConfig::default();
+        cfg.batch_size = batch_size as _;
+        cfg.ordering = Ordering::kNM;
+        evaluate(&result_tr[..], &cfg, res_host).unwrap();
+        for i in 0..batch_size {
+            result.push(IcicleCircleEvaluation::<BaseField, BitReversedOrder>::new(
+                domain,
+                unsafe {
+                    transmute(res_host.as_slice()[i * domain_size..(i + 1) * domain_size].to_vec())
+                },
+            ));
+        }
+
+        result
     }
 
     fn precompute_twiddles(coset: Coset) -> TwiddleTree<Self> {
