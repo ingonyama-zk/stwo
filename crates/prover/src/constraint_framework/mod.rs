@@ -1,11 +1,12 @@
 /// ! This module contains helpers to express and use constraints for components.
 mod assert;
 mod component;
-pub mod constant_columns;
 mod cpu_domain;
+pub mod expr;
 mod info;
 pub mod logup;
 mod point;
+pub mod preprocessed_columns;
 mod simd_domain;
 
 use std::array;
@@ -17,12 +18,17 @@ pub use component::{FrameworkComponent, FrameworkEval, TraceLocationAllocator};
 pub use info::InfoEvaluator;
 use num_traits::{One, Zero};
 pub use point::PointEvaluator;
+use preprocessed_columns::PreprocessedColumn;
 pub use simd_domain::SimdDomainEvaluator;
 
 use crate::core::fields::m31::BaseField;
 use crate::core::fields::qm31::SecureField;
 use crate::core::fields::secure_column::SECURE_EXTENSION_DEGREE;
 use crate::core::fields::FieldExpOps;
+
+pub const ORIGINAL_TRACE_IDX: usize = 0;
+pub const INTERACTION_TRACE_IDX: usize = 1;
+pub const PREPROCESSED_TRACE_IDX: usize = 2;
 
 /// A trait for evaluating expressions at some point or row.
 pub trait EvalAtRow {
@@ -66,7 +72,12 @@ pub trait EvalAtRow {
 
     /// Returns the next mask value for the first interaction at offset 0.
     fn next_trace_mask(&mut self) -> Self::F {
-        let [mask_item] = self.next_interaction_mask(0, [0]);
+        let [mask_item] = self.next_interaction_mask(ORIGINAL_TRACE_IDX, [0]);
+        mask_item
+    }
+
+    fn get_preprocessed_column(&mut self, _column: PreprocessedColumn) -> Self::F {
+        let [mask_item] = self.next_interaction_mask(PREPROCESSED_TRACE_IDX, [0]);
         mask_item
     }
 
