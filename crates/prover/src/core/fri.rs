@@ -5,20 +5,13 @@ use std::iter::zip;
 use std::mem::transmute;
 use std::ops::RangeInclusive;
 
-#[cfg(feature = "icicle")]
-use icicle_core::ntt::FieldImpl;
-#[cfg(feature = "icicle")]
-use icicle_cuda_runtime::memory::{DeviceVec, HostSlice};
-#[cfg(feature = "icicle")]
-use icicle_m31::field::{QuarticExtensionField, ScalarField};
-#[cfg(feature = "icicle")]
-use icicle_m31::fri;
 use itertools::Itertools;
 use num_traits::Zero;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{span, Level};
 
+use super::backend::simd::domain;
 use super::backend::CpuBackend;
 use super::channel::{Channel, MerkleChannel};
 use super::fields::m31::BaseField;
@@ -32,6 +25,7 @@ use super::poly::BitReversedOrder;
 // TODO(andrew): Create fri/ directory, move queries.rs there and split this file up.
 use super::queries::{Queries, SparseSubCircleDomain};
 use crate::core::circle::Coset;
+use crate::core::fft::ibutterfly;
 #[cfg(not(feature = "icicle"))]
 use crate::core::fft::ibutterfly;
 // #[cfg(not(feature = "icicle"))]
@@ -929,70 +923,22 @@ pub fn fold_line(
 
     let domain = eval.domain();
 
-    #[cfg(feature = "icicle")]
-    {
-        use crate::core::backend::icicle::IcicleBackend;
-        let length = eval.values.len();
+    let folded_values = eval
+        .values
+        .into_iter()
+        .array_chunks()
+        .enumerate()
+        .map(|(i, [f_x, f_neg_x])| {
+            // TODO(andrew): Inefficient. Update when domain twiddles get stored in a buffer.
+            let x = domain.at(bit_reverse_index(i << FOLD_STEP, domain.log_size()));
 
-        let dom_vals_len = length / 2;
-        let domain_vals = (0..dom_vals_len)
-            .map(|i| {
-                let x = domain.at(bit_reverse_index(i << FOLD_STEP, domain.log_size()));
-                ScalarField::from_u32(x.0)
-            })
-            .collect::<Vec<_>>();
+            let (mut f0, mut f1) = (f_x, f_neg_x);
+            ibutterfly(&mut f0, &mut f1, x.inverse());
+            f0 + alpha * f1
+        })
+        .collect();
 
-        let domain_icicle_host = HostSlice::from_slice(domain_vals.as_slice());
-        let mut d_domain_icicle = DeviceVec::<ScalarField>::cuda_malloc(dom_vals_len).unwrap();
-        d_domain_icicle.copy_from_host(domain_icicle_host).unwrap();
-
-        let mut d_evals_icicle = DeviceVec::<QuarticExtensionField>::cuda_malloc(length).unwrap();
-        SecureColumnByCoords::<IcicleBackend>::convert_to_icicle(
-            unsafe { transmute(&eval.values) },
-            &mut d_evals_icicle,
-        );
-        let mut d_folded_eval =
-            DeviceVec::<QuarticExtensionField>::cuda_malloc(dom_vals_len).unwrap();
-
-        let cfg = fri::FriConfig::default();
-        let icicle_alpha = unsafe { transmute(alpha) };
-        let _ = fri::fold_line(
-            &d_evals_icicle[..],
-            &d_domain_icicle[..],
-            &mut d_folded_eval[..],
-            icicle_alpha,
-            &cfg,
-        )
-        .unwrap();
-
-        let mut folded_values = unsafe { SecureColumnByCoords::uninitialized(dom_vals_len) };
-        SecureColumnByCoords::<IcicleBackend>::convert_from_icicle_q31(
-            &mut folded_values,
-            &mut d_folded_eval[..],
-        );
-
-        LineEvaluation::new(domain.double(), folded_values)
-    }
-
-    #[cfg(not(feature = "icicle"))]
-    {
-        let folded_values = eval
-            .values
-            .into_iter()
-            .array_chunks()
-            .enumerate()
-            .map(|(i, [f_x, f_neg_x])| {
-                // TODO(andrew): Inefficient. Update when domain twiddles get stored in a buffer.
-                let x = domain.at(bit_reverse_index(i << FOLD_STEP, domain.log_size()));
-
-                let (mut f0, mut f1) = (f_x, f_neg_x);
-                ibutterfly(&mut f0, &mut f1, x.inverse());
-                f0 + alpha * f1
-            })
-            .collect();
-
-        LineEvaluation::new(domain.double(), folded_values)
-    }
+    LineEvaluation::new(domain.double(), folded_values)
 }
 
 /// Folds and accumulates a degree `d` circle polynomial into a degree `d/2` univariate
@@ -1003,148 +949,27 @@ pub fn fold_circle_into_line(
     src: &SecureEvaluation<CpuBackend, BitReversedOrder>,
     alpha: SecureField,
 ) {
-    assert_eq!(src.len() >> CIRCLE_TO_LINE_FOLD_STEP, dst.len());
+    let alpha_sq = alpha * alpha;
 
     let domain = src.domain;
 
-    // println!("cpu alpha: {:?}", alpha);
-
-    // println!(
-    //     "\nFolding circle into line... {:?}={:?}",
-    //     src.len(),
-    //     dst.len(),
-    //     // src.columns,
-    //     // src.domain,
-    //     // alpha
-    // );
-    let mut domain_rev = Vec::new();
     src.into_iter()
         .array_chunks()
         .enumerate()
-        .for_each(|(i, [_f_p, _f_neg_p])| {
+        .for_each(|(i, [f_p, f_neg_p])| {
             // TODO(andrew): Inefficient. Update when domain twiddles get stored in a buffer.
-            // #[cfg(feature = "icicle")]
-            // let p = domain.at(i);
-            // #[cfg(not(feature = "icicle"))]
             let p = domain.at(bit_reverse_index(
                 i << CIRCLE_TO_LINE_FOLD_STEP,
                 domain.log_size(),
             ));
-            let p = p.y.inverse();
-            domain_rev.push(p);
+
+            // Calculate `f0(px)` and `f1(px)` such that `2f(p) = f0(px) + py * f1(px)`.
+            let (mut f0_px, mut f1_px) = (f_p, f_neg_p);
+            ibutterfly(&mut f0_px, &mut f1_px, p.y.inverse());
+            let f_prime = alpha * f1_px + f0_px;
+
+            dst.values.set(i, dst.values.at(i) * alpha_sq + f_prime);
         });
-
-    // println!("cpu    domain_vals {:?}", domain_rev);
-
-    #[cfg(feature = "icicle")]
-    {
-        use crate::core::backend::icicle::IcicleBackend;
-        let length = src.values.len();
-
-        let dom_vals_len = length / 2;
-        let _domain_log_size = domain.log_size();
-        // let domain_vals = (0..dom_vals_len)
-        //     .map(|i| {
-        //         let p = domain.at(bit_reverse_index(
-        //             i << CIRCLE_TO_LINE_FOLD_STEP,
-        //             domain_log_size,
-        //         ));
-        //         ScalarField::from_u32(p.y.0)
-        //     })
-        //     .collect::<Vec<_>>();
-        let domain_vals = (0..dom_vals_len)
-            .map(|i| {
-                let p = domain_rev[i];
-                ScalarField::from_u32(p.0)
-            })
-            .collect::<Vec<_>>();
-
-        let domain_icicle_host = HostSlice::from_slice(domain_vals.as_slice());
-        // println!("icicle domain_vals {:?}", domain_vals);
-        let mut d_domain_icicle = DeviceVec::<ScalarField>::cuda_malloc(dom_vals_len).unwrap();
-        d_domain_icicle.copy_from_host(domain_icicle_host).unwrap();
-
-        let mut d_evals_icicle = DeviceVec::<QuarticExtensionField>::cuda_malloc(length).unwrap();
-        SecureColumnByCoords::<IcicleBackend>::convert_to_icicle(
-            unsafe { transmute(&src.values) },
-            &mut d_evals_icicle,
-        );
-        let mut d_folded_eval =
-            DeviceVec::<QuarticExtensionField>::cuda_malloc(dom_vals_len).unwrap();
-        SecureColumnByCoords::<IcicleBackend>::convert_to_icicle(unsafe { transmute(&dst.values)}, &mut d_folded_eval);
-
-        let mut folded_eval_raw = vec![QuarticExtensionField::zero(); dom_vals_len];
-        let folded_eval = HostSlice::from_mut_slice(folded_eval_raw.as_mut_slice());
-
-        let cfg = fri::FriConfig::default();
-        let icicle_alpha = unsafe { transmute(alpha) };
-        // println!("icl alpha: {:?}", icicle_alpha);
-
-        let _ = fri::fold_circle_into_line(
-            &d_evals_icicle[..],
-            &d_domain_icicle[..],
-            &mut d_folded_eval[..],
-            icicle_alpha,
-            &cfg,
-        )
-        .unwrap();
-
-        d_folded_eval.copy_to_host(folded_eval).unwrap();
-
-        SecureColumnByCoords::<IcicleBackend>::convert_from_icicle_q31(
-            &mut dst.values,
-            &mut d_folded_eval[..],
-        );
-        // println!(
-        //     "after convert: Folding circle into line... {:?}={:?} domain {:?} dst: {:?}",
-        //     src.len(),
-        //     dst.len(),
-        //     src.domain,
-        //     dst
-        // );
-
-        // println!(
-        //     "End: Folding circle into line... {:?}={:?} domain {:?} dst: {:?}",
-        //     src.len(),
-        //     dst.len(),
-        //     src.domain,
-        //     dst
-        // );
-    }
-
-    #[cfg(not(feature = "icicle"))]
-    {
-        let alpha_sq = alpha * alpha;
-        // println!("cpu alpha_sq: {:?}", alpha_sq);
-
-        src.into_iter()
-            .array_chunks()
-            .enumerate()
-            .for_each(|(i, [f_p, f_neg_p])| {
-                // TODO(andrew): Inefficient. Update when domain twiddles get stored in a buffer.
-                // let p = domain.at(bit_reverse_index(
-                //     i << CIRCLE_TO_LINE_FOLD_STEP,
-                //     domain.log_size(),
-                // ));
-
-                let p = domain_rev[i];
-
-                // Calculate `f0(px)` and `f1(px)` such that `2f(p) = f0(px) + py * f1(px)`.
-                let (mut f0_px, mut f1_px) = (f_p, f_neg_p);
-                ibutterfly(&mut f0_px, &mut f1_px, p);
-                let f_prime = alpha * f1_px + f0_px;
-
-                dst.values.set(i, dst.values.at(i) * alpha_sq + f_prime);
-            });
-
-        // println!(
-        //     "End: Folding circle into line... {:?}={:?} domain {:?} dst: {:?}",
-        //     src.len(),
-        //     dst.len(),
-        //     src.domain,
-        //     dst
-        // );
-    }
 }
 
 #[cfg(test)]

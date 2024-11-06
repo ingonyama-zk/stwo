@@ -1,11 +1,14 @@
 // IcicleBackend amalgamation
 // TODO: move to separate files
 use core::fmt::Debug;
+use std::array;
 use std::ffi::c_void;
+use std::iter::zip;
 use std::mem::{size_of_val, transmute};
 
 use icicle_core::vec_ops::{accumulate_scalars, VecOpsConfig};
 use icicle_m31::dcct::{evaluate, get_dcct_root_of_unity, initialize_dcct_domain, interpolate};
+use icicle_m31::fri::{self, fold_circle_into_line, FriConfig};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use twiddles::TwiddleTree;
@@ -18,8 +21,8 @@ use crate::core::channel::Channel;
 use crate::core::circle::{self, CirclePoint, Coset};
 use crate::core::fields::qm31::SecureField;
 use crate::core::fields::secure_column::SecureColumnByCoords;
-use crate::core::fields::{Field, FieldOps};
-use crate::core::fri::FriOps;
+use crate::core::fields::{Field, FieldExpOps, FieldOps};
+use crate::core::fri::{FriOps, CIRCLE_TO_LINE_FOLD_STEP, FOLD_STEP};
 use crate::core::lookups::gkr_prover::GkrOps;
 use crate::core::lookups::mle::MleOps;
 use crate::core::pcs::quotients::ColumnSampleBatch;
@@ -29,6 +32,7 @@ use crate::core::poly::circle::{
 use crate::core::poly::line::LineEvaluation;
 use crate::core::poly::{twiddles, BitReversedOrder};
 use crate::core::proof_of_work::GrindOps;
+use crate::core::utils::bit_reverse_index;
 use crate::core::vcs::blake2_merkle::{Blake2sMerkleChannel, Blake2sMerkleHasher};
 use crate::core::vcs::ops::{MerkleHasher, MerkleOps};
 use crate::core::vcs::poseidon252_merkle::{Poseidon252MerkleChannel, Poseidon252MerkleHasher};
@@ -381,7 +385,52 @@ impl FriOps for IcicleBackend {
         alpha: SecureField,
         twiddles: &TwiddleTree<Self>,
     ) -> LineEvaluation<Self> {
-        todo!()
+        use crate::core::backend::icicle::IcicleBackend;
+        let length = eval.values.len(); // TODO: same as n
+
+        let n = eval.len();
+        assert!(n >= 2, "Evaluation too small");
+
+        let domain = eval.domain();
+
+        let dom_vals_len = length / 2;
+        let domain_vals = (0..dom_vals_len)
+            .map(|i| {
+                let x = domain.at(bit_reverse_index(i << FOLD_STEP, domain.log_size()));
+                ScalarField::from_u32(x.0)
+            })
+            .collect::<Vec<_>>();
+
+        let domain_icicle_host = HostSlice::from_slice(domain_vals.as_slice());
+        let mut d_domain_icicle = DeviceVec::<ScalarField>::cuda_malloc(dom_vals_len).unwrap();
+        d_domain_icicle.copy_from_host(domain_icicle_host).unwrap();
+
+        let mut d_evals_icicle = DeviceVec::<QuarticExtensionField>::cuda_malloc(length).unwrap();
+        SecureColumnByCoords::<IcicleBackend>::convert_to_icicle(
+            unsafe { transmute(&eval.values) },
+            &mut d_evals_icicle,
+        );
+        let mut d_folded_eval =
+            DeviceVec::<QuarticExtensionField>::cuda_malloc(dom_vals_len).unwrap();
+
+        let cfg = FriConfig::default();
+        let icicle_alpha = unsafe { transmute(alpha) };
+        let _ = fri::fold_line(
+            &d_evals_icicle[..],
+            &d_domain_icicle[..],
+            &mut d_folded_eval[..],
+            icicle_alpha,
+            &cfg,
+        )
+        .unwrap();
+
+        let mut folded_values = unsafe { SecureColumnByCoords::uninitialized(dom_vals_len) };
+        SecureColumnByCoords::<IcicleBackend>::convert_from_icicle_q31(
+            &mut folded_values,
+            &mut d_folded_eval[..],
+        );
+
+        LineEvaluation::new(domain.double(), folded_values)
     }
 
     fn fold_circle_into_line(
@@ -390,13 +439,68 @@ impl FriOps for IcicleBackend {
         alpha: SecureField,
         twiddles: &TwiddleTree<Self>,
     ) {
-        todo!()
+        assert_eq!(src.len() >> CIRCLE_TO_LINE_FOLD_STEP, dst.len());
+
+        let domain = src.domain;
+        let length = src.values.len();
+
+        let dom_vals_len = length / 2;
+        let _domain_log_size = domain.log_size();
+
+        let mut domain_rev = Vec::new();
+        for i in 0..dom_vals_len {
+            // TODO: on-device batch
+            // TODO(andrew): Inefficient. Update when domain twiddles get stored in a buffer.
+            let p = domain.at(bit_reverse_index(
+                i << CIRCLE_TO_LINE_FOLD_STEP,
+                domain.log_size(),
+            ));
+            let p = p.y.inverse();
+            domain_rev.push(p);
+        }
+
+        let domain_vals = (0..dom_vals_len)
+            .map(|i| {
+                let p = domain_rev[i];
+                ScalarField::from_u32(p.0)
+            })
+            .collect::<Vec<_>>();
+
+        let domain_icicle_host = HostSlice::from_slice(domain_vals.as_slice());
+        let mut d_domain_icicle = DeviceVec::<ScalarField>::cuda_malloc(dom_vals_len).unwrap();
+        d_domain_icicle.copy_from_host(domain_icicle_host).unwrap();
+
+        let mut d_evals_icicle = DeviceVec::<QuarticExtensionField>::cuda_malloc(length).unwrap();
+        SecureColumnByCoords::convert_to_icicle(&src.values, &mut d_evals_icicle);
+        let mut d_folded_eval =
+            DeviceVec::<QuarticExtensionField>::cuda_malloc(dom_vals_len).unwrap();
+        SecureColumnByCoords::convert_to_icicle(&dst.values, &mut d_folded_eval);
+
+        let mut folded_eval_raw = vec![QuarticExtensionField::zero(); dom_vals_len];
+        let folded_eval = HostSlice::from_mut_slice(folded_eval_raw.as_mut_slice());
+
+        let cfg = FriConfig::default();
+        let icicle_alpha = unsafe { transmute(alpha) };
+
+        let _ = fold_circle_into_line(
+            &d_evals_icicle[..],
+            &d_domain_icicle[..],
+            &mut d_folded_eval[..],
+            icicle_alpha,
+            &cfg,
+        )
+        .unwrap();
+
+        d_folded_eval.copy_to_host(folded_eval).unwrap();
+
+        SecureColumnByCoords::convert_from_icicle_q31(&mut dst.values, &mut d_folded_eval[..]);
     }
 
     fn decompose(
         eval: &SecureEvaluation<Self, BitReversedOrder>,
     ) -> (SecureEvaluation<Self, BitReversedOrder>, SecureField) {
-        todo!()
+        // todo!()
+        unsafe { transmute(CpuBackend::decompose(unsafe { transmute(eval) })) }
     }
 }
 
@@ -466,6 +570,57 @@ use icicle_cuda_runtime::memory::{DeviceSlice, DeviceVec, HostOrDeviceSlice, Hos
 use icicle_cuda_runtime::stream::CudaStream;
 use icicle_m31::field::{QuarticExtensionField, ScalarField};
 
+pub struct SecureColumnByCoordsIter<'a> {
+    column: &'a SecureColumnByCoords<IcicleBackend>,
+    index: usize,
+}
+impl Iterator for SecureColumnByCoordsIter<'_> {
+    type Item = SecureField;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index < self.column.len() {
+            let value = self.column.at(self.index);
+            self.index += 1;
+            Some(value)
+        } else {
+            None
+        }
+    }
+}
+impl<'a> IntoIterator for &'a SecureColumnByCoords<IcicleBackend> {
+    type Item = SecureField;
+    type IntoIter = SecureColumnByCoordsIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        SecureColumnByCoordsIter {
+            column: self,
+            index: 0,
+        }
+    }
+}
+
+impl FromIterator<SecureField> for SecureColumnByCoords<IcicleBackend> { //TODO: just stub - ideally not [m31; 4] layout - and no conversion
+    fn from_iter<I: IntoIterator<Item = SecureField>>(iter: I) -> Self {
+        let values = iter.into_iter();
+        let (lower_bound, _) = values.size_hint();
+        let mut columns = array::from_fn(|_| Vec::with_capacity(lower_bound));
+
+        for value in values {
+            let coords = value.to_m31_array();
+            zip(&mut columns, coords).for_each(|(col, coord)| col.push(coord));
+        }
+
+        SecureColumnByCoords { columns }
+    }
+}
+
+impl SecureColumnByCoords<IcicleBackend> {
+    // TODO(first): Remove.
+    pub fn to_vec(&self) -> Vec<SecureField> {
+        (0..self.len()).map(|i| self.at(i)).collect()
+    }
+}
+
 impl SecureColumnByCoords<IcicleBackend> {
     pub fn convert_to_icicle(input: &Self, d_output: &mut DeviceSlice<QuarticExtensionField>) {
         let a: &[u32] = unsafe { transmute(input.columns[0].as_slice()) };
@@ -518,7 +673,9 @@ impl SecureColumnByCoords<IcicleBackend> {
     }
 
     pub fn convert_from_icicle_q31(
-        output: &mut SecureColumnByCoords<CpuBackend>,
+        // TODO: remove as convert_from_icicle should perform same on device via transpose just on
+        // casted data
+        output: &mut SecureColumnByCoords<IcicleBackend>,
         d_input: &mut DeviceSlice<QuarticExtensionField>,
     ) {
         #[cfg(feature = "parallel")]
@@ -562,11 +719,18 @@ mod tests {
 
     use crate::core::backend::cpu::CpuCirclePoly;
     use crate::core::backend::icicle::{IcicleBackend, IcicleCircleEvaluation, IcicleCirclePoly};
+    use crate::core::backend::simd::SimdBackend;
     use crate::core::circle::CirclePoint;
     use crate::core::fields::m31::BaseField;
     use crate::core::fields::qm31::SecureField;
+    use crate::core::fields::secure_column::SecureColumnByCoords;
     use crate::core::fields::ExtensionOf;
-    use crate::core::poly::circle::{CanonicCoset, CircleEvaluation, CirclePoly};
+    use crate::core::fri::FriOps;
+    use crate::core::poly::circle::{
+        CanonicCoset, CircleEvaluation, CirclePoly, PolyOps, SecureEvaluation,
+    };
+    use crate::core::poly::line::{LineDomain, LineEvaluation};
+    use crate::qm31;
 
     impl<F: ExtensionOf<BaseField>, EvalOrder> IntoIterator
         for CircleEvaluation<IcicleBackend, F, EvalOrder>
@@ -709,63 +873,49 @@ mod tests {
         }
     }
 
-    // use crate::qm31;
-    // use crate::core::backend::icicle::column::BaseColumn;
-    // use crate::core::poly::circle::CircleEvaluation;
-    // use crate::core::poly::BitReversedOrder;
-    // use crate::core::circle::SECURE_FIELD_CIRCLE_GEN;
-    // use crate::core::pcs::quotients::ColumnSampleBatch;
-    // use crate::core::backend::CpuBackend;
-    // use crate::core::pcs::quotients::QuotientOps;
-    //
-    // #[test]
-    // fn test_icicle_accumulate_quotients() {
-    // const LOG_SIZE: u32 = 8;
-    // const LOG_BLOWUP_FACTOR: u32 = 1;
-    // let small_domain = CanonicCoset::new(LOG_SIZE).circle_domain();
-    // let domain = CanonicCoset::new(LOG_SIZE + LOG_BLOWUP_FACTOR).circle_domain();
-    // let e0: BaseColumn = (0..small_domain.size()).map(BaseField::from).collect();
-    // let e1: BaseColumn = (0..small_domain.size())
-    // .map(|i| BaseField::from(2 * i))
-    // .collect();
-    // let polys = vec![
-    // CircleEvaluation::<IcicleBackend, BaseField, BitReversedOrder>::new(small_domain, e0)
-    // .interpolate(),
-    // CircleEvaluation::<IcicleBackend, BaseField, BitReversedOrder>::new(small_domain, e1)
-    // .interpolate(),
-    // ];
-    // let columns = vec![polys[0].evaluate(domain), polys[1].evaluate(domain)];
-    // let random_coeff = qm31!(1, 2, 3, 4);
-    // let a = polys[0].eval_at_point(SECURE_FIELD_CIRCLE_GEN);
-    // let b = polys[1].eval_at_point(SECURE_FIELD_CIRCLE_GEN);
-    // let samples = vec![ColumnSampleBatch {
-    // point: SECURE_FIELD_CIRCLE_GEN,
-    // columns_and_values: vec![(0, a), (1, b)],
-    // }];
-    // let cpu_columns = columns
-    // .iter()
-    // .map(|c| CircleEvaluation::new(c.domain, c.values.to_cpu()))
-    // .collect_vec();
-    // let cpu_result = CpuBackend::accumulate_quotients(
-    // domain,
-    // &cpu_columns.iter().collect_vec(),
-    // random_coeff,
-    // &samples,
-    // LOG_BLOWUP_FACTOR,
-    // )
-    // .values
-    // .to_vec();
-    //
-    // let res = IcicleBackend::accumulate_quotients(
-    // domain,
-    // &columns.iter().collect_vec(),
-    // random_coeff,
-    // &samples,
-    // LOG_BLOWUP_FACTOR,
-    // )
-    // .values
-    // .to_vec();
-    //
-    // assert_eq!(res, cpu_result);
-    // }
+    #[test]
+    fn test_icicle_fold_circle_into_line() {
+        let mut is_correct = true;
+        for log_size in 1..20 {
+            let values: Vec<SecureField> = (0..(1 << log_size))
+                .map(|i| qm31!(4 * i, 4 * i + 1, 4 * i + 2, 4 * i + 3))
+                .collect();
+            let alpha = qm31!(1, 3, 5, 7);
+            let circle_domain = CanonicCoset::new(log_size).circle_domain();
+            let line_domain = LineDomain::new(circle_domain.half_coset);
+            let mut icicle_fold = LineEvaluation::new(
+                line_domain,
+                SecureColumnByCoords::zeros(1 << (log_size - 1)),
+            );
+            IcicleBackend::fold_circle_into_line(
+                &mut icicle_fold,
+                &SecureEvaluation::new(circle_domain, values.iter().copied().collect()),
+                alpha,
+                &IcicleBackend::precompute_twiddles(line_domain.coset()),
+            );
+
+            let mut simd_fold = LineEvaluation::new(
+                line_domain,
+                SecureColumnByCoords::zeros(1 << (log_size - 1)),
+            );
+            SimdBackend::fold_circle_into_line(
+                &mut simd_fold,
+                &SecureEvaluation::new(circle_domain, values.iter().copied().collect()),
+                alpha,
+                &SimdBackend::precompute_twiddles(line_domain.coset()),
+            );
+
+            // assert_eq!(
+            //     cpu_fold.values.to_vec(),
+            //     simd_fold.values.to_vec(),
+            //     "failed to fold log2: {}",
+            //     log_size
+            // );
+            if icicle_fold.values.to_vec() != simd_fold.values.to_vec() {
+                println!("failed to fold log2: {}", log_size);
+                is_correct = false;
+            }
+        }
+        assert!(is_correct);
+    }
 }
