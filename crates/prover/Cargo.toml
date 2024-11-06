@@ -7,7 +7,7 @@ edition.workspace = true
 default = []
 parallel = ["rayon"]
 slow-tests = []
-icicle_poc = ["icicle-cuda-runtime", "icicle-core", "icicle-m31"]
+icicle = ["icicle-cuda-runtime", "icicle-core", "icicle-m31"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

@@ -11,7 +11,7 @@ const LOG_SIZE: usize = 28;
 const SIZE: usize = 1 << LOG_SIZE;
 
 pub fn cpu_accumulate(c: &mut Criterion) {
-    #[cfg(feature = "icicle_poc")]
+    #[cfg(feature = "icicle")]
     {
         use icicle_core::vec_ops::{accumulate_scalars, VecOpsConfig};
         use icicle_cuda_runtime::memory::DeviceVec;
@@ -44,7 +44,7 @@ pub fn cpu_accumulate(c: &mut Criterion) {
         });
     }
 
-    #[cfg(not(feature = "icicle_poc"))]
+    #[cfg(not(feature = "icicle"))]
     {
         let mut data = SecureColumnByCoords::<CpuBackend> {
             columns: std::array::from_fn(|i| vec![BaseField::from_u32_unchecked(i as u32); SIZE]),

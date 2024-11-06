@@ -35,7 +35,7 @@ impl PolyOps for CpuBackend {
         eval: CircleEvaluation<Self, BaseField, BitReversedOrder>,
         twiddles: &TwiddleTree<Self>,
     ) -> CirclePoly<Self> {
-        #[cfg(feature = "icicle_poc")]
+        #[cfg(feature = "icicle")]
         {
             if eval.domain.log_size() > 3 && eval.domain.log_size() != 7 {
                 return unsafe {
@@ -129,7 +129,7 @@ impl PolyOps for CpuBackend {
         domain: CircleDomain,
         twiddles: &TwiddleTree<Self>,
     ) -> CircleEvaluation<Self, BaseField, BitReversedOrder> {
-        #[cfg(feature = "icicle_poc")]
+        #[cfg(feature = "icicle")]
         {
             if domain.log_size() > 3 && domain.log_size() != 7 {
                 return unsafe {

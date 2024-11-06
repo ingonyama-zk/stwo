@@ -82,7 +82,7 @@ mod tests {
     use crate::core::fields::m31::BaseField;
     use crate::core::poly::circle::{CanonicCoset, PolyOps};
 
-    #[cfg(feature = "icicle_poc")]
+    #[cfg(feature = "icicle")]
     #[test]
     fn test_evaluate_polynomials() {
         use itertools::Itertools;

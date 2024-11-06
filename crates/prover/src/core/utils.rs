@@ -140,7 +140,7 @@ pub fn coset_index_to_circle_domain_index(coset_index: usize, log_domain_size: u
 pub fn bit_reverse<T>(v: &mut [T]) {
     let n = v.len();
     assert!(n.is_power_of_two());
-    #[cfg(not(feature = "icicle_poc"))]
+    #[cfg(not(feature = "icicle"))]
     {
         let log_n = n.ilog2();
         for i in 0..n {
@@ -151,7 +151,7 @@ pub fn bit_reverse<T>(v: &mut [T]) {
         }
     }
 
-    #[cfg(feature = "icicle_poc")]
+    #[cfg(feature = "icicle")]
     unsafe {
         let limbs_count: usize = size_of_val(&v[0]) / 4;
         use std::slice;
