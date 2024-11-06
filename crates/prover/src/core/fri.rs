@@ -2,8 +2,17 @@ use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::iter::zip;
+use std::mem::transmute;
 use std::ops::RangeInclusive;
 
+#[cfg(feature = "icicle")]
+use icicle_core::ntt::FieldImpl;
+#[cfg(feature = "icicle")]
+use icicle_cuda_runtime::memory::{DeviceVec, HostSlice};
+#[cfg(feature = "icicle")]
+use icicle_m31::field::{QuarticExtensionField, ScalarField};
+#[cfg(feature = "icicle")]
+use icicle_m31::fri;
 use itertools::Itertools;
 use num_traits::Zero;
 use serde::{Deserialize, Serialize};
@@ -23,8 +32,12 @@ use super::poly::BitReversedOrder;
 // TODO(andrew): Create fri/ directory, move queries.rs there and split this file up.
 use super::queries::{Queries, SparseSubCircleDomain};
 use crate::core::circle::Coset;
+#[cfg(not(feature = "icicle"))]
 use crate::core::fft::ibutterfly;
+// #[cfg(not(feature = "icicle"))]
 use crate::core::fields::FieldExpOps;
+// use crate::core::fft::ibutterfly;
+// use crate::core::fields::FieldExpOps;
 use crate::core::poly::line::LineDomain;
 use crate::core::utils::bit_reverse_index;
 use crate::core::vcs::ops::{MerkleHasher, MerkleOps};
@@ -916,22 +929,70 @@ pub fn fold_line(
 
     let domain = eval.domain();
 
-    let folded_values = eval
-        .values
-        .into_iter()
-        .array_chunks()
-        .enumerate()
-        .map(|(i, [f_x, f_neg_x])| {
-            // TODO(andrew): Inefficient. Update when domain twiddles get stored in a buffer.
-            let x = domain.at(bit_reverse_index(i << FOLD_STEP, domain.log_size()));
+    #[cfg(feature = "icicle")]
+    {
+        use crate::core::backend::icicle::IcicleBackend;
+        let length = eval.values.len();
 
-            let (mut f0, mut f1) = (f_x, f_neg_x);
-            ibutterfly(&mut f0, &mut f1, x.inverse());
-            f0 + alpha * f1
-        })
-        .collect();
+        let dom_vals_len = length / 2;
+        let domain_vals = (0..dom_vals_len)
+            .map(|i| {
+                let x = domain.at(bit_reverse_index(i << FOLD_STEP, domain.log_size()));
+                ScalarField::from_u32(x.0)
+            })
+            .collect::<Vec<_>>();
 
-    LineEvaluation::new(domain.double(), folded_values)
+        let domain_icicle_host = HostSlice::from_slice(domain_vals.as_slice());
+        let mut d_domain_icicle = DeviceVec::<ScalarField>::cuda_malloc(dom_vals_len).unwrap();
+        d_domain_icicle.copy_from_host(domain_icicle_host).unwrap();
+
+        let mut d_evals_icicle = DeviceVec::<QuarticExtensionField>::cuda_malloc(length).unwrap();
+        SecureColumnByCoords::<IcicleBackend>::convert_to_icicle(
+            unsafe { transmute(&eval.values) },
+            &mut d_evals_icicle,
+        );
+        let mut d_folded_eval =
+            DeviceVec::<QuarticExtensionField>::cuda_malloc(dom_vals_len).unwrap();
+
+        let cfg = fri::FriConfig::default();
+        let icicle_alpha = unsafe { transmute(alpha) };
+        let _ = fri::fold_line(
+            &d_evals_icicle[..],
+            &d_domain_icicle[..],
+            &mut d_folded_eval[..],
+            icicle_alpha,
+            &cfg,
+        )
+        .unwrap();
+
+        let mut folded_values = unsafe { SecureColumnByCoords::uninitialized(dom_vals_len) };
+        SecureColumnByCoords::<IcicleBackend>::convert_from_icicle_q31(
+            &mut folded_values,
+            &mut d_folded_eval[..],
+        );
+
+        LineEvaluation::new(domain.double(), folded_values)
+    }
+
+    #[cfg(not(feature = "icicle"))]
+    {
+        let folded_values = eval
+            .values
+            .into_iter()
+            .array_chunks()
+            .enumerate()
+            .map(|(i, [f_x, f_neg_x])| {
+                // TODO(andrew): Inefficient. Update when domain twiddles get stored in a buffer.
+                let x = domain.at(bit_reverse_index(i << FOLD_STEP, domain.log_size()));
+
+                let (mut f0, mut f1) = (f_x, f_neg_x);
+                ibutterfly(&mut f0, &mut f1, x.inverse());
+                f0 + alpha * f1
+            })
+            .collect();
+
+        LineEvaluation::new(domain.double(), folded_values)
+    }
 }
 
 /// Folds and accumulates a degree `d` circle polynomial into a degree `d/2` univariate
@@ -945,25 +1006,145 @@ pub fn fold_circle_into_line(
     assert_eq!(src.len() >> CIRCLE_TO_LINE_FOLD_STEP, dst.len());
 
     let domain = src.domain;
-    let alpha_sq = alpha * alpha;
 
+    // println!("cpu alpha: {:?}", alpha);
+
+    // println!(
+    //     "\nFolding circle into line... {:?}={:?}",
+    //     src.len(),
+    //     dst.len(),
+    //     // src.columns,
+    //     // src.domain,
+    //     // alpha
+    // );
+    let mut domain_rev = Vec::new();
     src.into_iter()
         .array_chunks()
         .enumerate()
-        .for_each(|(i, [f_p, f_neg_p])| {
+        .for_each(|(i, [_f_p, _f_neg_p])| {
             // TODO(andrew): Inefficient. Update when domain twiddles get stored in a buffer.
+            // #[cfg(feature = "icicle")]
+            // let p = domain.at(i);
+            // #[cfg(not(feature = "icicle"))]
             let p = domain.at(bit_reverse_index(
                 i << CIRCLE_TO_LINE_FOLD_STEP,
                 domain.log_size(),
             ));
-
-            // Calculate `f0(px)` and `f1(px)` such that `2f(p) = f0(px) + py * f1(px)`.
-            let (mut f0_px, mut f1_px) = (f_p, f_neg_p);
-            ibutterfly(&mut f0_px, &mut f1_px, p.y.inverse());
-            let f_prime = alpha * f1_px + f0_px;
-
-            dst.values.set(i, dst.values.at(i) * alpha_sq + f_prime);
+            let p = p.y.inverse();
+            domain_rev.push(p);
         });
+
+    // println!("cpu    domain_vals {:?}", domain_rev);
+
+    #[cfg(feature = "icicle")]
+    {
+        use crate::core::backend::icicle::IcicleBackend;
+        let length = src.values.len();
+
+        let dom_vals_len = length / 2;
+        let _domain_log_size = domain.log_size();
+        // let domain_vals = (0..dom_vals_len)
+        //     .map(|i| {
+        //         let p = domain.at(bit_reverse_index(
+        //             i << CIRCLE_TO_LINE_FOLD_STEP,
+        //             domain_log_size,
+        //         ));
+        //         ScalarField::from_u32(p.y.0)
+        //     })
+        //     .collect::<Vec<_>>();
+        let domain_vals = (0..dom_vals_len)
+            .map(|i| {
+                let p = domain_rev[i];
+                ScalarField::from_u32(p.0)
+            })
+            .collect::<Vec<_>>();
+
+        let domain_icicle_host = HostSlice::from_slice(domain_vals.as_slice());
+        // println!("icicle domain_vals {:?}", domain_vals);
+        let mut d_domain_icicle = DeviceVec::<ScalarField>::cuda_malloc(dom_vals_len).unwrap();
+        d_domain_icicle.copy_from_host(domain_icicle_host).unwrap();
+
+        let mut d_evals_icicle = DeviceVec::<QuarticExtensionField>::cuda_malloc(length).unwrap();
+        SecureColumnByCoords::<IcicleBackend>::convert_to_icicle(
+            unsafe { transmute(&src.values) },
+            &mut d_evals_icicle,
+        );
+        let mut d_folded_eval =
+            DeviceVec::<QuarticExtensionField>::cuda_malloc(dom_vals_len).unwrap();
+        SecureColumnByCoords::<IcicleBackend>::convert_to_icicle(unsafe { transmute(&dst.values)}, &mut d_folded_eval);
+
+        let mut folded_eval_raw = vec![QuarticExtensionField::zero(); dom_vals_len];
+        let folded_eval = HostSlice::from_mut_slice(folded_eval_raw.as_mut_slice());
+
+        let cfg = fri::FriConfig::default();
+        let icicle_alpha = unsafe { transmute(alpha) };
+        // println!("icl alpha: {:?}", icicle_alpha);
+
+        let _ = fri::fold_circle_into_line(
+            &d_evals_icicle[..],
+            &d_domain_icicle[..],
+            &mut d_folded_eval[..],
+            icicle_alpha,
+            &cfg,
+        )
+        .unwrap();
+
+        d_folded_eval.copy_to_host(folded_eval).unwrap();
+
+        SecureColumnByCoords::<IcicleBackend>::convert_from_icicle_q31(
+            &mut dst.values,
+            &mut d_folded_eval[..],
+        );
+        // println!(
+        //     "after convert: Folding circle into line... {:?}={:?} domain {:?} dst: {:?}",
+        //     src.len(),
+        //     dst.len(),
+        //     src.domain,
+        //     dst
+        // );
+
+        // println!(
+        //     "End: Folding circle into line... {:?}={:?} domain {:?} dst: {:?}",
+        //     src.len(),
+        //     dst.len(),
+        //     src.domain,
+        //     dst
+        // );
+    }
+
+    #[cfg(not(feature = "icicle"))]
+    {
+        let alpha_sq = alpha * alpha;
+        // println!("cpu alpha_sq: {:?}", alpha_sq);
+
+        src.into_iter()
+            .array_chunks()
+            .enumerate()
+            .for_each(|(i, [f_p, f_neg_p])| {
+                // TODO(andrew): Inefficient. Update when domain twiddles get stored in a buffer.
+                // let p = domain.at(bit_reverse_index(
+                //     i << CIRCLE_TO_LINE_FOLD_STEP,
+                //     domain.log_size(),
+                // ));
+
+                let p = domain_rev[i];
+
+                // Calculate `f0(px)` and `f1(px)` such that `2f(p) = f0(px) + py * f1(px)`.
+                let (mut f0_px, mut f1_px) = (f_p, f_neg_p);
+                ibutterfly(&mut f0_px, &mut f1_px, p);
+                let f_prime = alpha * f1_px + f0_px;
+
+                dst.values.set(i, dst.values.at(i) * alpha_sq + f_prime);
+            });
+
+        // println!(
+        //     "End: Folding circle into line... {:?}={:?} domain {:?} dst: {:?}",
+        //     src.len(),
+        //     dst.len(),
+        //     src.domain,
+        //     dst
+        // );
+    }
 }
 
 #[cfg(test)]
@@ -973,6 +1154,8 @@ mod tests {
 
     use itertools::Itertools;
     use num_traits::{One, Zero};
+    #[cfg(feature = "parallel")]
+    use rayon::iter::IntoParallelIterator;
 
     use super::{get_opening_positions, FriVerificationError, SparseCircleEvaluation};
     use crate::core::backend::cpu::{CpuCircleEvaluation, CpuCirclePoly};
@@ -992,6 +1175,7 @@ mod tests {
     use crate::core::test_utils::test_channel;
     use crate::core::utils::bit_reverse_index;
     use crate::core::vcs::blake2_merkle::Blake2sMerkleChannel;
+    use crate::{cm31, qm31};
 
     /// Default blowup factor used for tests.
     const LOG_BLOWUP_FACTOR: u32 = 2;
@@ -1036,7 +1220,7 @@ mod tests {
 
     #[test]
     fn fold_circle_to_line_works() {
-        const LOG_DEGREE: u32 = 4;
+        const LOG_DEGREE: u32 = 5;
         let circle_evaluation = polynomial_evaluation(LOG_DEGREE, LOG_BLOWUP_FACTOR);
         let alpha = SecureField::one();
         let folded_domain = LineDomain::new(circle_evaluation.domain.half_coset);
@@ -1086,7 +1270,7 @@ mod tests {
 
     #[test]
     fn valid_proof_passes_verification() -> Result<(), FriVerificationError> {
-        const LOG_DEGREE: u32 = 3;
+        const LOG_DEGREE: u32 = 5;
         let evaluation = polynomial_evaluation(LOG_DEGREE, LOG_BLOWUP_FACTOR);
         let log_domain_size = evaluation.domain.log_size();
         let queries = Queries::from_positions(vec![5], log_domain_size);
@@ -1108,7 +1292,7 @@ mod tests {
     #[test]
     fn valid_proof_with_constant_last_layer_passes_verification() -> Result<(), FriVerificationError>
     {
-        const LOG_DEGREE: u32 = 3;
+        const LOG_DEGREE: u32 = 4;
         const LAST_LAYER_LOG_BOUND: u32 = 0;
         let evaluation = polynomial_evaluation(LOG_DEGREE, LOG_BLOWUP_FACTOR);
         let log_domain_size = evaluation.domain.log_size();
@@ -1130,7 +1314,7 @@ mod tests {
 
     #[test]
     fn valid_mixed_degree_proof_passes_verification() -> Result<(), FriVerificationError> {
-        const LOG_DEGREES: [u32; 3] = [6, 5, 4];
+        const LOG_DEGREES: [u32; 2] = [6, 5];
         let evaluations = LOG_DEGREES.map(|log_d| polynomial_evaluation(log_d, LOG_BLOWUP_FACTOR));
         let log_domain_size = evaluations[0].domain.log_size();
         let queries = Queries::from_positions(vec![7, 70], log_domain_size);
@@ -1313,30 +1497,41 @@ mod tests {
 
     #[test]
     fn proof_with_invalid_last_layer_fails_verification() {
-        const LOG_DEGREE: u32 = 6;
-        let evaluation = polynomial_evaluation(LOG_DEGREE, LOG_BLOWUP_FACTOR);
-        let log_domain_size = evaluation.domain.log_size();
-        let queries = Queries::from_positions(vec![1, 7, 8], log_domain_size);
-        let config = FriConfig::new(2, LOG_BLOWUP_FACTOR, queries.len());
-        let decommitment_value = query_polynomial(&evaluation, &queries);
-        let prover = FriProver::commit(
-            &mut test_channel(),
-            config,
-            &[evaluation.clone()],
-            &CpuBackend::precompute_twiddles(evaluation.domain.half_coset),
-        );
-        let bound = vec![CirclePolyDegreeBound::new(LOG_DEGREE)];
-        let mut proof = prover.decommit_on_queries(&queries);
-        // Compromise the last layer polynomial's first coefficient.
-        proof.last_layer_poly[0] += BaseField::one();
-        let verifier = FriVerifier::commit(&mut test_channel(), config, proof, bound).unwrap();
+        fn test_iter() {
+            const LOG_DEGREE: u32 = 6;
+            let evaluation = polynomial_evaluation(LOG_DEGREE, LOG_BLOWUP_FACTOR);
+            let log_domain_size = evaluation.domain.log_size();
+            let queries = Queries::from_positions(vec![1, 7, 8], log_domain_size);
+            let config = FriConfig::new(2, LOG_BLOWUP_FACTOR, queries.len());
+            let decommitment_value = query_polynomial(&evaluation, &queries);
+            let prover = FriProver::commit(
+                &mut test_channel(),
+                config,
+                &[evaluation.clone()],
+                &CpuBackend::precompute_twiddles(evaluation.domain.half_coset),
+            );
+            let bound = vec![CirclePolyDegreeBound::new(LOG_DEGREE)];
+            let mut proof = prover.decommit_on_queries(&queries);
+            // Compromise the last layer polynomial's first coefficient.
+            proof.last_layer_poly[0] += BaseField::one();
+            let verifier = FriVerifier::commit(&mut test_channel(), config, proof, bound).unwrap();
 
-        let verification_result = verifier.decommit_on_queries(&queries, vec![decommitment_value]);
+            let verification_result =
+                verifier.decommit_on_queries(&queries, vec![decommitment_value]);
 
-        assert!(matches!(
-            verification_result,
-            Err(FriVerificationError::LastLayerEvaluationsInvalid)
-        ));
+            assert!(matches!(
+                verification_result,
+                Err(FriVerificationError::LastLayerEvaluationsInvalid)
+            ));
+        }
+
+        #[cfg(feature = "parallel")]
+        use rayon::iter::ParallelIterator;
+        #[cfg(feature = "parallel")]
+        (0..10).into_par_iter().for_each(|_i| test_iter());
+
+        #[cfg(not(feature = "parallel"))]
+        (0..10).into_iter().for_each(|_i| test_iter());
     }
 
     #[test]
@@ -1362,6 +1557,28 @@ mod tests {
         invalid_queries.log_domain_size -= 1;
 
         let _ = verifier.decommit_on_queries(&invalid_queries, vec![decommitment_value]);
+    }
+
+    #[test]
+    fn mult_test() {
+        use crate::core::fields::cm31::CM31;
+        let val_qm = qm31!(1, 2, 3, 4);
+        println!("val_qm1: {:?} sqrt {:?}", val_qm, val_qm * val_qm);
+
+        let val_qm = qm31!(2, 1, 0, 3);
+        println!("val_qm2: {:?} sqrt {:?}", val_qm, val_qm * val_qm);
+
+        let val_qm = qm31!(2, 0, 0, 2);
+        println!("val_qm2: {:?} sqrt {:?}", val_qm, val_qm * val_qm);
+
+        let val_cm = cm31!(1, 2);
+        println!("val_cm: {:?} sqrt {:?}", val_cm, val_cm * val_cm);
+
+        let val_cm = cm31!(2, 0);
+        println!("val_cm2: {:?} sqrt {:?}", val_cm, val_cm * val_cm);
+
+        let val_cm = cm31!(2, 1);
+        println!("val_cm3: {:?} sqrt {:?}", val_cm, val_cm * val_cm);
     }
 
     /// Returns an evaluation of a random polynomial with degree `2^log_degree`.

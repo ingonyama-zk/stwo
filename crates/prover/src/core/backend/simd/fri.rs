@@ -206,36 +206,48 @@ mod tests {
 
     #[test]
     fn test_fold_circle_into_line() {
-        const LOG_SIZE: u32 = 7;
-        let values: Vec<SecureField> = (0..(1 << LOG_SIZE))
-            .map(|i| qm31!(4 * i, 4 * i + 1, 4 * i + 2, 4 * i + 3))
-            .collect();
-        let alpha = qm31!(1, 3, 5, 7);
-        let circle_domain = CanonicCoset::new(LOG_SIZE).circle_domain();
-        let line_domain = LineDomain::new(circle_domain.half_coset);
-        let mut cpu_fold = LineEvaluation::new(
-            line_domain,
-            SecureColumnByCoords::zeros(1 << (LOG_SIZE - 1)),
-        );
-        CpuBackend::fold_circle_into_line(
-            &mut cpu_fold,
-            &SecureEvaluation::new(circle_domain, values.iter().copied().collect()),
-            alpha,
-            &CpuBackend::precompute_twiddles(line_domain.coset()),
-        );
+        let mut is_correct = true;
+        for log_size in 1..20 {
+            let values: Vec<SecureField> = (0..(1 << log_size))
+                .map(|i| qm31!(4 * i, 4 * i + 1, 4 * i + 2, 4 * i + 3))
+                .collect();
+            let alpha = qm31!(1, 3, 5, 7);
+            let circle_domain = CanonicCoset::new(log_size).circle_domain();
+            let line_domain = LineDomain::new(circle_domain.half_coset);
+            let mut cpu_fold = LineEvaluation::new(
+                line_domain,
+                SecureColumnByCoords::zeros(1 << (log_size - 1)),
+            );
+            CpuBackend::fold_circle_into_line(
+                &mut cpu_fold,
+                &SecureEvaluation::new(circle_domain, values.iter().copied().collect()),
+                alpha,
+                &CpuBackend::precompute_twiddles(line_domain.coset()),
+            );
 
-        let mut simd_fold = LineEvaluation::new(
-            line_domain,
-            SecureColumnByCoords::zeros(1 << (LOG_SIZE - 1)),
-        );
-        SimdBackend::fold_circle_into_line(
-            &mut simd_fold,
-            &SecureEvaluation::new(circle_domain, values.iter().copied().collect()),
-            alpha,
-            &SimdBackend::precompute_twiddles(line_domain.coset()),
-        );
+            let mut simd_fold = LineEvaluation::new(
+                line_domain,
+                SecureColumnByCoords::zeros(1 << (log_size - 1)),
+            );
+            SimdBackend::fold_circle_into_line(
+                &mut simd_fold,
+                &SecureEvaluation::new(circle_domain, values.iter().copied().collect()),
+                alpha,
+                &SimdBackend::precompute_twiddles(line_domain.coset()),
+            );
 
-        assert_eq!(cpu_fold.values.to_vec(), simd_fold.values.to_vec());
+            // assert_eq!(
+            //     cpu_fold.values.to_vec(),
+            //     simd_fold.values.to_vec(),
+            //     "failed to fold log2: {}",
+            //     log_size
+            // );
+            if cpu_fold.values.to_vec() != simd_fold.values.to_vec() {
+                println!("failed to fold log2: {}", log_size);
+                is_correct = false;
+            }
+        }
+        assert!(is_correct);
     }
 
     #[test]

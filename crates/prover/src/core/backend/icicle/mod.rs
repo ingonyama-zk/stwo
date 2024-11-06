@@ -468,13 +468,6 @@ use icicle_m31::field::{QuarticExtensionField, ScalarField};
 
 impl SecureColumnByCoords<IcicleBackend> {
     pub fn convert_to_icicle(input: &Self, d_output: &mut DeviceSlice<QuarticExtensionField>) {
-        let zero = ScalarField::zero();
-
-        let n = input.columns[0].len();
-        let secure_degree = input.columns.len();
-
-        let cfg = VecOpsConfig::default();
-
         let a: &[u32] = unsafe { transmute(input.columns[0].as_slice()) };
         let b: &[u32] = unsafe { transmute(input.columns[1].as_slice()) };
         let c: &[u32] = unsafe { transmute(input.columns[2].as_slice()) };
@@ -485,7 +478,7 @@ impl SecureColumnByCoords<IcicleBackend> {
         let c = HostSlice::from_slice(&c);
         let d = HostSlice::from_slice(&d);
 
-        stwo_convert(a, b, c, d, d_output);
+        let _ = stwo_convert(a, b, c, d, d_output).unwrap();
     }
 
     pub fn convert_from_icicle(input: &mut Self, d_input: &mut DeviceSlice<ScalarField>) {
@@ -494,8 +487,6 @@ impl SecureColumnByCoords<IcicleBackend> {
         let n = input.columns[0].len();
         let secure_degree = input.columns.len();
         let mut intermediate_host = vec![zero; secure_degree * n];
-
-        let cfg = VecOpsConfig::default();
 
         let mut result_tr: DeviceVec<ScalarField> =
             DeviceVec::cuda_malloc(secure_degree * n).unwrap();
@@ -511,12 +502,10 @@ impl SecureColumnByCoords<IcicleBackend> {
         )
         .unwrap();
 
-        let mut res_host = HostSlice::from_mut_slice(&mut intermediate_host[..]);
+        let res_host = HostSlice::from_mut_slice(&mut intermediate_host[..]);
         result_tr.copy_to_host(res_host).unwrap();
 
-        use crate::core::fields::m31::M31;
-
-        let res: Vec<M31> = unsafe { transmute(intermediate_host) };
+        let res: Vec<BaseField> = unsafe { transmute(intermediate_host) };
 
         // Assign the sub-slices to the column
         for i in 0..secure_degree {
@@ -526,6 +515,41 @@ impl SecureColumnByCoords<IcicleBackend> {
             input.columns[i].truncate(0);
             input.columns[i].extend_from_slice(&res[start..end]);
         }
+    }
+
+    pub fn convert_from_icicle_q31(
+        output: &mut SecureColumnByCoords<CpuBackend>,
+        d_input: &mut DeviceSlice<QuarticExtensionField>,
+    ) {
+        #[cfg(feature = "parallel")]
+        use std::sync::{Arc, Mutex};
+
+        #[cfg(feature = "parallel")]
+        use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
+
+        #[cfg(feature = "parallel")]
+        let output = Arc::new(Mutex::new(output));
+        let mut cols_internal = vec![QuarticExtensionField::zero(); d_input.len()];
+        d_input
+            .copy_to_host(HostSlice::from_mut_slice(&mut cols_internal))
+            .unwrap();
+
+        #[cfg(feature = "parallel")]
+        let iter = cols_internal.par_iter();
+
+        #[cfg(not(feature = "parallel"))]
+        let iter = cols_internal.iter();
+
+        iter.enumerate().for_each(|(i, inp)| {
+            let q_icicle_raw: [u32; 4] = (*inp).into();
+            let m31s = std::array::from_fn(|i| BaseField::from(q_icicle_raw[i]));
+            let q_stwo = SecureField::from_m31_array(m31s);
+
+            // Lock the mutex to get mutable access to output
+            #[cfg(feature = "parallel")]
+            let mut output = output.lock().unwrap();
+            output.set(i, q_stwo); // This line is now valid
+        });
     }
 }
 

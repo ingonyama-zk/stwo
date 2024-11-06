@@ -15,9 +15,9 @@ use super::proof_of_work::GrindOps;
 use super::vcs::ops::MerkleOps;
 
 pub mod cpu;
+pub mod simd;
 #[cfg(feature = "icicle")]
 pub mod icicle;
-pub mod simd;
 
 pub trait Backend:
     Copy
