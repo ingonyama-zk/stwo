@@ -26,12 +26,7 @@ use super::poly::BitReversedOrder;
 use super::queries::{Queries, SparseSubCircleDomain};
 use crate::core::circle::Coset;
 use crate::core::fft::ibutterfly;
-#[cfg(not(feature = "icicle"))]
-use crate::core::fft::ibutterfly;
-// #[cfg(not(feature = "icicle"))]
 use crate::core::fields::FieldExpOps;
-// use crate::core::fft::ibutterfly;
-// use crate::core::fields::FieldExpOps;
 use crate::core::poly::line::LineDomain;
 use crate::core::utils::bit_reverse_index;
 use crate::core::vcs::ops::{MerkleHasher, MerkleOps};
