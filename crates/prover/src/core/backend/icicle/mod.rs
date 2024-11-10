@@ -394,12 +394,19 @@ impl FriOps for IcicleBackend {
         let domain = eval.domain();
 
         let dom_vals_len = length / 2;
-        let domain_vals = (0..dom_vals_len)
-            .map(|i| {
-                let x = domain.at(bit_reverse_index(i << FOLD_STEP, domain.log_size()));
-                ScalarField::from_u32(x.0)
-            })
-            .collect::<Vec<_>>();
+
+        let mut domain_vals = Vec::new();
+        let line_domain_log_size = domain.log_size();
+        for i in 0..dom_vals_len {
+            // TODO: on-device batch
+            // TODO(andrew): Inefficient. Update when domain twiddles get stored in a buffer.
+            domain_vals.push(ScalarField::from_u32(
+                domain
+                    .at(bit_reverse_index(i << FOLD_STEP, line_domain_log_size))
+                    .inverse()
+                    .0,
+            ));
+        }
 
         let domain_icicle_host = HostSlice::from_slice(domain_vals.as_slice());
         let mut d_domain_icicle = DeviceVec::<ScalarField>::cuda_malloc(dom_vals_len).unwrap();
@@ -599,7 +606,8 @@ impl<'a> IntoIterator for &'a SecureColumnByCoords<IcicleBackend> {
     }
 }
 
-impl FromIterator<SecureField> for SecureColumnByCoords<IcicleBackend> { //TODO: just stub - ideally not [m31; 4] layout - and no conversion
+impl FromIterator<SecureField> for SecureColumnByCoords<IcicleBackend> {
+    // TODO: just stub - ideally not [m31; 4] layout - and no conversion
     fn from_iter<I: IntoIterator<Item = SecureField>>(iter: I) -> Self {
         let values = iter.into_iter();
         let (lower_bound, _) = values.size_hint();
@@ -730,6 +738,7 @@ mod tests {
         CanonicCoset, CircleEvaluation, CirclePoly, PolyOps, SecureEvaluation,
     };
     use crate::core::poly::line::{LineDomain, LineEvaluation};
+    use crate::core::poly::twiddles::TwiddleTree;
     use crate::qm31;
 
     impl<F: ExtensionOf<BaseField>, EvalOrder> IntoIterator
@@ -870,6 +879,67 @@ mod tests {
             let poly = evaluation.clone().interpolate();
             let evaluation2 = poly.evaluate(domain);
             assert_eq!(evaluation.values, evaluation2.values);
+        }
+    }
+
+    use std::ptr::null_mut;
+
+    use num_traits::Zero;
+    #[cfg(feature = "parallel")]
+    use rayon::iter::IntoParallelIterator;
+
+    use crate::core::backend::{ColumnOps, CpuBackend};
+    use crate::core::circle::{CirclePointIndex, Coset};
+    use crate::core::fields::Field;
+    use crate::core::fri::{
+        fold_circle_into_line, fold_line, CirclePolyDegreeBound, FriConfig,
+        CIRCLE_TO_LINE_FOLD_STEP,
+    };
+    use crate::core::poly::line::LinePoly;
+    use crate::core::poly::{BitReversedOrder, NaturalOrder};
+    use crate::core::queries::{Queries, SparseSubCircleDomain};
+    use crate::core::test_utils::test_channel;
+    use crate::core::utils::bit_reverse_index;
+    use crate::core::vcs::blake2_merkle::Blake2sMerkleChannel;
+
+    /// Default blowup factor used for tests.
+    const LOG_BLOWUP_FACTOR: u32 = 2;
+
+    #[test]
+    fn test_icicle_fold_line_works() {
+        const DEGREE: usize = 8;
+        // Coefficients are bit-reversed.
+        let even_coeffs: [SecureField; DEGREE / 2] = [1, 2, 1, 3]
+            .map(BaseField::from_u32_unchecked)
+            .map(SecureField::from);
+        let odd_coeffs: [SecureField; DEGREE / 2] = [3, 5, 4, 1]
+            .map(BaseField::from_u32_unchecked)
+            .map(SecureField::from);
+        let poly = LinePoly::new([even_coeffs, odd_coeffs].concat());
+        let even_poly = LinePoly::new(even_coeffs.to_vec());
+        let odd_poly = LinePoly::new(odd_coeffs.to_vec());
+        let alpha = BaseField::from_u32_unchecked(19283).into();
+        let domain = LineDomain::new(Coset::half_odds(DEGREE.ilog2()));
+        let drp_domain = domain.double();
+        let mut values = domain
+            .iter()
+            .map(|p| poly.eval_at_point(p.into()))
+            .collect();
+        IcicleBackend::bit_reverse_column(&mut values);
+        let evals = LineEvaluation::new(domain, values.into_iter().collect());
+
+        let dummy_domain = CanonicCoset::new(2);
+
+        let dummy_twiddles = IcicleBackend::precompute_twiddles(dummy_domain.half_coset());
+        let drp_evals = IcicleBackend::fold_line(&evals, alpha, &dummy_twiddles);
+        let mut drp_evals = drp_evals.values.into_iter().collect_vec();
+        IcicleBackend::bit_reverse_column(&mut drp_evals);
+
+        assert_eq!(drp_evals.len(), DEGREE / 2);
+        for (i, (&drp_eval, x)) in zip(&drp_evals, drp_domain).enumerate() {
+            let f_e: SecureField = even_poly.eval_at_point(x.into());
+            let f_o: SecureField = odd_poly.eval_at_point(x.into());
+            assert_eq!(drp_eval, (f_e + alpha * f_o).double(), "mismatch at {i}");
         }
     }
 

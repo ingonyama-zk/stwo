@@ -14,19 +14,28 @@ use stwo_prover::core::poly::twiddles::TwiddleTree;
 
 const ALPHA: SecureField = SecureField::from_u32_unchecked(2213980, 2213981, 2213982, 2213983);
 
-fn get_max_log_size() -> u32 {
+fn get_min_max_log_size() -> (u32, u32) {
+    const MIN_LOG2: u32 = 1; // min length = 2 ^ MIN_LOG2
     const MAX_LOG2: u32 = 25; // max length = 2 ^ MAX_LOG2
 
+    let min_log2 = env::var("MIN_LOG2")
+        .unwrap_or_else(|_| MIN_LOG2.to_string())
+        .parse::<u32>()
+        .unwrap_or(MIN_LOG2);
     let max_log2 = env::var("MAX_LOG2")
         .unwrap_or_else(|_| MAX_LOG2.to_string())
         .parse::<u32>()
         .unwrap_or(MAX_LOG2);
-    max_log2
+
+    assert!(min_log2 >= MIN_LOG2);
+    assert!(min_log2 < max_log2);
+
+    (min_log2, max_log2)
 }
 
 fn folding_benchmark(c: &mut Criterion) {
-    let max_log2 = get_max_log_size();
-    for log_size in 1..=max_log2 {
+    let (min_log2, max_log2) = get_min_max_log_size();
+    for log_size in min_log2..=max_log2 {
         let coset = CanonicCoset::new(log_size + 1);
         let line_domain = LineDomain::new(coset.half_coset());
         let twiddles = CpuBackend::precompute_twiddles(line_domain.coset()); // TODO: actually twiddles are not used
@@ -133,8 +142,8 @@ fn icicle_raw_folding_benchmark(c: &mut Criterion) {
         use stwo_prover::core::poly::BitReversedOrder;
         use stwo_prover::core::utils::bit_reverse_index;
 
-        let max_log2 = get_max_log_size();
-        for log_size in 1..=max_log2 {
+        let (min_log2,max_log2) = get_min_max_log_size();
+        for log_size in min_log2..=max_log2 {
             let coset = CanonicCoset::new(log_size + 1);
             let line_domain = LineDomain::new(coset.half_coset());
             let backend_descr: &str = "icicle raw";
@@ -153,13 +162,16 @@ fn icicle_raw_folding_benchmark(c: &mut Criterion) {
             assert!(n >= 2, "Evaluation too small");
 
             let dom_vals_len = n / 2;
-            let domain_vals = (0..dom_vals_len)
-                .map(|i| {
-                    let x =
-                        line_domain.at(bit_reverse_index(i << FOLD_STEP, line_domain.log_size()));
-                    ScalarField::from_u32(x.0)
-                })
-                .collect::<Vec<_>>();
+
+            let mut domain_vals = Vec::new();
+            let line_domain_log_size = line_domain.log_size();
+            for i in 0..dom_vals_len {
+                // TODO: on-device batch
+                // TODO(andrew): Inefficient. Update when domain twiddles get stored in a buffer.
+                let x = line_domain.at(bit_reverse_index(i << FOLD_STEP, line_domain_log_size));
+                let x = x.inverse();
+                domain_vals.push(ScalarField::from_u32(x.0));
+            }
 
             let domain_icicle_host = HostSlice::from_slice(domain_vals.as_slice());
             let mut d_domain_icicle = DeviceVec::<ScalarField>::cuda_malloc(dom_vals_len).unwrap();
