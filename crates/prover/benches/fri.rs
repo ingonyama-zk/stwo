@@ -119,12 +119,13 @@ fn folding_benchmark(c: &mut Criterion) {
 }
 
 fn icicle_raw_folding_benchmark(c: &mut Criterion) {
+    black_box(&c);
     #[cfg(feature = "icicle")]
     {
         use std::mem::transmute;
 
         use icicle_core::ntt::FieldImpl;
-        use icicle_cuda_runtime::memory::{DeviceVec, HostSlice};
+        use icicle_cuda_runtime::memory::{DeviceVec, HostOrDeviceSlice, HostSlice};
         use icicle_m31::field::{QuarticExtensionField, ScalarField};
         use icicle_m31::fri::{self, fold_circle_into_line, FriConfig};
         use stwo_prover::core::fields::FieldExpOps;
@@ -174,6 +175,11 @@ fn icicle_raw_folding_benchmark(c: &mut Criterion) {
 
             let cfg = FriConfig::default();
             let icicle_alpha = unsafe { transmute(ALPHA) };
+
+            println!(
+                "fold line: d_evals_icicle len: {:?} d_folded_eval len: {:?}",
+                n, dom_vals_len
+            );
 
             c.bench_function(
                 &std::format!("{} fold_line log2 = {}", backend_descr, log_size),
@@ -239,6 +245,15 @@ fn icicle_raw_folding_benchmark(c: &mut Criterion) {
             SecureColumnByCoords::convert_to_icicle(&circle_evals.values, &mut d_evals_icicle);
             let mut d_folded_eval =
                 DeviceVec::<QuarticExtensionField>::cuda_malloc(dom_vals_len).unwrap();
+
+            println!(
+                "fold circle: d_evals_icicle len: {:?} d_folded_eval len: {:?}, length  {}, circle_domain.log_size(): {} {}",
+                d_evals_icicle.len(),
+                d_folded_eval.len(),
+                length,
+                circle_domain.log_size(),
+                circle_domain.size(),
+            );
 
             let cfg = FriConfig::default();
             let icicle_alpha = unsafe { transmute(alpha) };
