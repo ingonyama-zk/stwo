@@ -60,7 +60,8 @@ fn folding_benchmark(c: &mut Criterion) {
             );
         }
 
-        if max_log2 < 15 { //TODO: no need to bench long slow runs
+        if max_log2 < 15 {
+            // TODO: no need to bench long slow runs
             bench_fold_line::<CpuBackend>(line_domain, c, log_size, &twiddles, "cpu");
 
             #[cfg(feature = "icicle")]
@@ -107,7 +108,8 @@ fn folding_benchmark(c: &mut Criterion) {
             );
         }
 
-        if max_log2 < 15 { //TODO: no need to bench long slow runs
+        if max_log2 < 15 {
+            // TODO: no need to bench long slow runs
             bench_fold_circle::<CpuBackend>(log_size, c, &twiddles, "cpu");
 
             #[cfg(feature = "icicle")]
@@ -251,11 +253,11 @@ fn icicle_raw_folding_benchmark(c: &mut Criterion) {
                     b.iter(|| {
                         black_box(
                             fold_circle_into_line(
-                                &d_evals_icicle[..],
-                                &d_domain_icicle[..],
-                                &mut d_folded_eval[..],
-                                icicle_alpha,
-                                &cfg,
+                                black_box(&d_evals_icicle[..]),
+                                black_box(&d_domain_icicle[..]),
+                                black_box(&mut d_folded_eval[..]),
+                                black_box(icicle_alpha),
+                                black_box(&cfg),
                             )
                             .unwrap(),
                         );
