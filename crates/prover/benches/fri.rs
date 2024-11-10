@@ -60,10 +60,12 @@ fn folding_benchmark(c: &mut Criterion) {
             );
         }
 
-        bench_fold_line::<CpuBackend>(line_domain, c, log_size, &twiddles, "cpu");
+        if max_log2 < 15 { //TODO: no need to bench long slow runs
+            bench_fold_line::<CpuBackend>(line_domain, c, log_size, &twiddles, "cpu");
 
-        #[cfg(feature = "icicle")]
-        bench_fold_line::<IcicleBackend>(line_domain, c, log_size, &twiddles, "icicle");
+            #[cfg(feature = "icicle")]
+            bench_fold_line::<IcicleBackend>(line_domain, c, log_size, &twiddles, "icicle");
+        }
 
         // fold circle
         fn bench_fold_circle<B: Backend + FriOps + ColumnOps<BaseField>>(
