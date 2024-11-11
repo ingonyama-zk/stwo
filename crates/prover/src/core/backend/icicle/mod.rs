@@ -724,6 +724,8 @@ mod tests {
 
     use itertools::Itertools;
     use num_traits::One;
+    use rand::rngs::SmallRng;
+    use rand::{Rng, SeedableRng};
 
     use crate::core::backend::cpu::CpuCirclePoly;
     use crate::core::backend::icicle::{IcicleBackend, IcicleCircleEvaluation, IcicleCirclePoly};
@@ -941,6 +943,35 @@ mod tests {
             let f_o: SecureField = odd_poly.eval_at_point(x.into());
             assert_eq!(drp_eval, (f_e + alpha * f_o).double(), "mismatch at {i}");
         }
+    }
+
+    #[test]
+    fn test_icicle_fold_line() {
+        let mut is_correct = true;
+        for log_size in 1..24 {
+            let mut rng = SmallRng::seed_from_u64(0);
+            let values = (0..1 << log_size).map(|_| rng.gen()).collect_vec();
+            let alpha = qm31!(1, 3, 5, 7);
+            let domain = LineDomain::new(CanonicCoset::new(log_size + 1).half_coset());
+
+            let secure_column: SecureColumnByCoords<_> = values.iter().copied().collect();
+            let line_evaluation = LineEvaluation::new(domain, secure_column);
+            let cpu_fold = CpuBackend::fold_line(
+                &line_evaluation,
+                alpha,
+                &CpuBackend::precompute_twiddles(domain.coset()),
+            );
+
+            let line_evaluation = LineEvaluation::new(domain, values.into_iter().collect());
+            let dummy_twiddles = IcicleBackend::precompute_twiddles(domain.coset());
+            let icicle_fold = IcicleBackend::fold_line(&line_evaluation, alpha, &dummy_twiddles);
+
+            if icicle_fold.values.to_vec() != cpu_fold.values.to_vec() {
+                println!("failed to fold log2: {}", log_size);
+                is_correct = false;
+            }
+        }
+        assert!(is_correct);
     }
 
     #[test]
