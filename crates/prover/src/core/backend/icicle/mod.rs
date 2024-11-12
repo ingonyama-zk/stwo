@@ -682,39 +682,10 @@ impl SecureColumnByCoords<IcicleBackend> {
 
     pub fn convert_from_icicle_q31(
         // TODO: remove as convert_from_icicle should perform same on device via transpose just on
-        // casted data
         output: &mut SecureColumnByCoords<IcicleBackend>,
         d_input: &mut DeviceSlice<QuarticExtensionField>,
     ) {
-        #[cfg(feature = "parallel")]
-        use std::sync::{Arc, Mutex};
-
-        #[cfg(feature = "parallel")]
-        use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
-
-        #[cfg(feature = "parallel")]
-        let output = Arc::new(Mutex::new(output));
-        let mut cols_internal = vec![QuarticExtensionField::zero(); d_input.len()];
-        d_input
-            .copy_to_host(HostSlice::from_mut_slice(&mut cols_internal))
-            .unwrap();
-
-        #[cfg(feature = "parallel")]
-        let iter = cols_internal.par_iter();
-
-        #[cfg(not(feature = "parallel"))]
-        let iter = cols_internal.iter();
-
-        iter.enumerate().for_each(|(i, inp)| {
-            let q_icicle_raw: [u32; 4] = (*inp).into();
-            let m31s = std::array::from_fn(|i| BaseField::from(q_icicle_raw[i]));
-            let q_stwo = SecureField::from_m31_array(m31s);
-
-            // Lock the mutex to get mutable access to output
-            #[cfg(feature = "parallel")]
-            let mut output = output.lock().unwrap();
-            output.set(i, q_stwo); // This line is now valid
-        });
+        Self::convert_from_icicle(output, unsafe { transmute(d_input) });
     }
 }
 
