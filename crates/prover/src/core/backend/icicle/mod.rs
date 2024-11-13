@@ -201,9 +201,9 @@ impl PolyOps for IcicleBackend {
 
         let values = eval.values;
         let rou = get_dcct_root_of_unity(eval.domain.size() as _);
-        println!("ROU {:?}", rou);
+        // println!("ROU {:?}", rou);
         initialize_dcct_domain(eval.domain.log_size(), rou, &DeviceContext::default()).unwrap();
-        println!("initialied DCCT succesfully");
+        // println!("initialied DCCT succesfully");
 
         let mut evaluations = vec![ScalarField::zero(); values.len()];
         let values: Vec<ScalarField> = unsafe { transmute(values) };
