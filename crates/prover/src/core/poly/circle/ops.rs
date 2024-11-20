@@ -87,7 +87,9 @@ mod tests {
     fn test_evaluate_polynomials() {
         use itertools::Itertools;
 
-        use crate::core::{backend::{icicle::IcicleBackend, Column}, ColumnVec};
+        use crate::core::backend::icicle::IcicleBackend;
+        use crate::core::backend::Column;
+        use crate::core::ColumnVec;
 
         let log_size = 9;
         let log2_cols = 8;
@@ -112,18 +114,11 @@ mod tests {
         let cpu_poly = CpuBackend::interpolate(cpu_evals, &cpu_twiddles);
         let gpu_poly = IcicleBackend::interpolate(gpu_evals, &gpu_twiddles);
 
-        let mut cpu_cols = ColumnVec::from(
-            (0..n_cols)
-                .map(|_| cpu_poly.clone())
-                .collect_vec(),
-        );
-        let mut gpu_cols = ColumnVec::from(
-            (0..n_cols)
-                .map(|_| gpu_poly.clone())
-                .collect_vec(),
-        );
+        let mut cpu_cols = ColumnVec::from((0..n_cols).map(|_| cpu_poly.clone()).collect_vec());
+        let mut gpu_cols = ColumnVec::from((0..n_cols).map(|_| gpu_poly.clone()).collect_vec());
 
-        let result = IcicleBackend::evaluate_polynomials(&mut gpu_cols, log_blowup_factor, &gpu_twiddles);
+        let result =
+            IcicleBackend::evaluate_polynomials(&mut gpu_cols, log_blowup_factor, &gpu_twiddles);
         let expected_result =
             CpuBackend::evaluate_polynomials(&mut cpu_cols, log_blowup_factor, &cpu_twiddles);
 

@@ -142,7 +142,7 @@ fn icicle_raw_folding_benchmark(c: &mut Criterion) {
         use stwo_prover::core::poly::BitReversedOrder;
         use stwo_prover::core::utils::bit_reverse_index;
 
-        let (min_log2,max_log2) = get_min_max_log_size();
+        let (min_log2, max_log2) = get_min_max_log_size();
         for log_size in min_log2..=max_log2 {
             let coset = CanonicCoset::new(log_size + 1);
             let line_domain = LineDomain::new(coset.half_coset());

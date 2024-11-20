@@ -205,7 +205,8 @@ mod tests {
     }
 
     #[test]
-    fn test_fold_circle_into_line() { //TODO: generic tests or macros for Backend trait as parameter
+    fn test_fold_circle_into_line() {
+        // TODO: generic tests or macros for Backend trait as parameter
         let mut is_correct = true;
         for log_size in 1..20 {
             let values: Vec<SecureField> = (0..(1 << log_size))
