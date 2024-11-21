@@ -2,13 +2,18 @@
 // TODO: move to separate files
 use core::fmt::Debug;
 use std::array;
+use std::cmp::Reverse;
 use std::ffi::c_void;
 use std::iter::zip;
 use std::mem::{size_of_val, transmute};
 
+use icicle_core::tree::{merkle_tree_digests_len, TreeBuilderConfig};
 use icicle_core::vec_ops::{accumulate_scalars, VecOpsConfig};
+use icicle_core::Matrix;
 use icicle_m31::dcct::{evaluate, get_dcct_root_of_unity, initialize_dcct_domain, interpolate};
 use icicle_m31::fri::{self, fold_circle_into_line, FriConfig};
+use icicle_hash::blake2s::build_blake2s_mmcs;
+
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use twiddles::TwiddleTree;
@@ -155,6 +160,65 @@ impl AccumulationOps for IcicleBackend {
 
 // stwo/crates/prover/src/core/backend/cpu/blake2s.rs
 impl MerkleOps<Blake2sMerkleHasher> for IcicleBackend {
+    const COMMIT_IMPLEMENTED: bool = true;
+
+    fn commit_columns(
+        columns: Vec<&Col<Self, BaseField>>
+    ) -> Vec<Col<Self, <Blake2sMerkleHasher as MerkleHasher>::Hash>> {
+        let mut config = TreeBuilderConfig::default();
+        config.arity = 2;
+        config.digest_elements = 32;
+        config.sort_inputs = false;
+
+        let log_max = columns
+                .iter()
+                .sorted_by_key(|c| Reverse(c.len()))
+                .next()
+                .unwrap()
+                .len()
+                .ilog2();
+        let mut matrices = vec![];
+        for col in columns.into_iter().sorted_by_key(|c| Reverse(c.len())) {
+            matrices.push(Matrix::from_slice(col, 4, col.len()));
+        }
+        let digests_len = merkle_tree_digests_len(log_max as u32, 2, 32);
+        let mut digests = vec![0u8; digests_len];
+        let digests_slice = HostSlice::from_mut_slice(&mut digests);
+
+        build_blake2s_mmcs(&matrices, digests_slice, &config).unwrap();
+
+        let mut digests: &[<Blake2sMerkleHasher as MerkleHasher>::Hash] = unsafe { std::mem::transmute(digests.as_mut_slice()) };
+        // Transmute digests into stwo format
+        let mut layers = vec![];
+        let mut offset = 0usize;
+        for log in 0..=log_max {
+            // println!("Layer: {}", log);
+            let inv_log = log_max - log;
+            let number_of_rows = 1 << inv_log;
+
+            // let layer = unsafe {
+            //     Vec::from_raw_parts(
+            //         digests.as_mut_ptr().add(offset) as *mut <Blake2sMerkleHasher as MerkleHasher>::Hash,
+            //         number_of_rows,
+            //         number_of_rows
+            //     )
+            // };
+            let mut layer = vec![];
+            layer.extend_from_slice(&digests[offset..offset+number_of_rows]);
+            // for h in &layer {
+            //     println!("{}", h);
+            // }
+            layers.push(layer);
+
+            if log != log_max {
+                offset += number_of_rows;
+            }
+        }
+
+        layers.reverse();
+        layers
+    }
+
     fn commit_on_layer(
         log_size: u32,
         prev_layer: Option<&Col<Self, <Blake2sMerkleHasher as MerkleHasher>::Hash>>,
@@ -554,6 +618,8 @@ impl QuotientOps for IcicleBackend {
 
 // stwo/crates/prover/src/core/vcs/poseidon252_merkle.rs
 impl MerkleOps<Poseidon252MerkleHasher> for IcicleBackend {
+    const COMMIT_IMPLEMENTED: bool = false;
+
     fn commit_on_layer(
         log_size: u32,
         prev_layer: Option<&Col<Self, <Poseidon252MerkleHasher as MerkleHasher>::Hash>>,
@@ -691,6 +757,7 @@ impl SecureColumnByCoords<IcicleBackend> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::iter::zip;
 
     use itertools::Itertools;
@@ -712,6 +779,8 @@ mod tests {
     };
     use crate::core::poly::line::{LineDomain, LineEvaluation};
     use crate::core::poly::twiddles::TwiddleTree;
+    use crate::core::vcs::prover::MerkleProver;
+    use crate::core::vcs::verifier::MerkleVerifier;
     use crate::qm31;
 
     impl<F: ExtensionOf<BaseField>, EvalOrder> IntoIterator
@@ -873,10 +942,69 @@ mod tests {
     use crate::core::queries::{Queries, SparseSubCircleDomain};
     use crate::core::test_utils::test_channel;
     use crate::core::utils::bit_reverse_index;
-    use crate::core::vcs::blake2_merkle::Blake2sMerkleChannel;
+    use crate::core::vcs::blake2_merkle::{Blake2sMerkleChannel, Blake2sMerkleHasher};
 
     /// Default blowup factor used for tests.
     const LOG_BLOWUP_FACTOR: u32 = 2;
+
+    #[test]
+    fn tetst_icicle_blake2s_merkle_tree() {
+        const N_COLS: usize = 10;
+        const N_QUERIES: usize = 3;
+        let log_size_range = 3..5;
+
+        let mut rng = SmallRng::seed_from_u64(0);
+        let log_sizes = (0..N_COLS)
+            .map(|_| rng.gen_range(log_size_range.clone()))
+            .collect_vec();
+        let cols = log_sizes
+            .iter()
+            .map(|&log_size| {
+                (0..(1 << log_size))
+                    .map(|_| BaseField::from(rng.gen_range(0..(1 << 30))))
+                    .collect_vec()
+            })
+            .collect_vec();
+
+        // for col in &cols {
+        //     println!("Col: {}", col.len());
+        // }
+
+        let merkle = MerkleProver::<CpuBackend, Blake2sMerkleHasher>::commit(cols.iter().collect_vec());
+        // for layer in &merkle.layers {
+        //     println!("LAYER");
+        //     for h in layer {
+        //         println!("CPU {:?}", h);
+        //     }
+        // }
+
+        let icicle_merkle = MerkleProver::<IcicleBackend, Blake2sMerkleHasher>::commit(cols.iter().collect_vec());
+
+        for (layer, icicle_layer) in merkle.layers.iter().zip(icicle_merkle.layers.iter()) {
+            for (h1, h2) in layer.iter().zip(icicle_layer.iter()) {
+                assert_eq!(h1, h2);
+            }
+        }
+
+        let mut queries = BTreeMap::<u32, Vec<usize>>::new();
+        for log_size in log_size_range.rev() {
+            let layer_queries = (0..N_QUERIES)
+                .map(|_| rng.gen_range(0..(1 << log_size)))
+                .sorted()
+                .dedup()
+                .collect_vec();
+            queries.insert(log_size, layer_queries);
+        }
+
+        let (values, decommitment) = merkle.decommit(queries.clone(), cols.iter().collect_vec());
+
+        let verifier = MerkleVerifier {
+            root: merkle.root(),
+            column_log_sizes: log_sizes,
+        };
+
+        verifier.verify(queries, values, decommitment).unwrap();
+    }
 
     #[test]
     fn test_icicle_fold_line_works() {

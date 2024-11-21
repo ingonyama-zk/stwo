@@ -39,24 +39,33 @@ impl<B: MerkleOps<H>, H: MerkleHasher> MerkleProver<B, H> {
     /// A new instance of `MerkleProver` with the committed layers.
     pub fn commit(columns: Vec<&Col<B, BaseField>>) -> Self {
         assert!(!columns.is_empty());
+        if B::COMMIT_IMPLEMENTED {
+            Self { layers: B::commit_columns(columns) }
+        } else {
+            let columns = &mut columns
+                .into_iter()
+                .sorted_by_key(|c| Reverse(c.len()))
+                .peekable();
+            let mut layers: Vec<Col<B, H::Hash>> = Vec::new();
 
-        let columns = &mut columns
-            .into_iter()
-            .sorted_by_key(|c| Reverse(c.len()))
-            .peekable();
-        let mut layers: Vec<Col<B, H::Hash>> = Vec::new();
 
-        let max_log_size = columns.peek().unwrap().len().ilog2();
-        for log_size in (0..=max_log_size).rev() {
-            // Take columns of the current log_size.
-            let layer_columns = columns
-                .peek_take_while(|column| column.len().ilog2() == log_size)
-                .collect_vec();
+            let max_log_size = columns.peek().unwrap().len().ilog2();
+            for log_size in (0..=max_log_size).rev() {
+                // Take columns of the current log_size.
+                let layer_columns = columns
+                    .peek_take_while(|column| column.len().ilog2() == log_size)
+                    .collect_vec();
 
-            layers.push(B::commit_on_layer(log_size, layers.last(), &layer_columns));
+                // TO DO: Remove on clean up
+                // for col in &layer_columns {
+                //     println!("First element equals {:02x}", col.at(0).0 & 0xff );
+                // }
+
+                layers.push(B::commit_on_layer(log_size, layers.last(), &layer_columns));
+            }
+            layers.reverse();
+            Self { layers }
         }
-        layers.reverse();
-        Self { layers }
     }
 
     /// Decommits to columns on the given queries.

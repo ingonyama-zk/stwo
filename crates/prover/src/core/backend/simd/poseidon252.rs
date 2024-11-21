@@ -18,6 +18,8 @@ impl ColumnOps<FieldElement252> for SimdBackend {
 }
 
 impl MerkleOps<Poseidon252MerkleHasher> for SimdBackend {
+    const COMMIT_IMPLEMENTED: bool = false;
+
     // TODO(ShaharS): replace with SIMD implementation.
     fn commit_on_layer(
         log_size: u32,
