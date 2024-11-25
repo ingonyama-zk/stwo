@@ -12,7 +12,6 @@ use thiserror::Error;
 use tracing::instrument;
 
 use super::backend::simd::domain;
-use super::backend::CpuBackend;
 use super::backend::{Col, CpuBackend};
 use super::channel::{Channel, MerkleChannel};
 use super::fields::m31::BaseField;

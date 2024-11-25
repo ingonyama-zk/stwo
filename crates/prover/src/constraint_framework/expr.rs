@@ -44,7 +44,7 @@ impl Expr {
                 idx,
                 offset,
             }) => {
-                let offset_str = if *offset == CLAIMED_SUM_DUMMY_OFFSET.try_into().unwrap() {
+                let offset_str = if *offset == CLAIMED_SUM_DUMMY_OFFSET as isize {
                     "claimed_sum_offset".to_string()
                 } else {
                     offset.to_string()

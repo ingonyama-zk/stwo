@@ -385,7 +385,7 @@ impl PolyOps for IcicleBackend {
     }
 
     fn evaluate_polynomials(
-        polynomials: &mut ColumnVec<CirclePoly<Self>>,
+        polynomials: &ColumnVec<CirclePoly<Self>>,
         log_blowup_factor: u32,
         twiddles: &TwiddleTree<Self>,
     ) -> Vec<CircleEvaluation<Self, BaseField, BitReversedOrder>> {
@@ -939,7 +939,7 @@ mod tests {
     };
     use crate::core::poly::line::LinePoly;
     use crate::core::poly::{BitReversedOrder, NaturalOrder};
-    use crate::core::queries::{Queries, SparseSubCircleDomain};
+    use crate::core::queries::Queries;
     use crate::core::test_utils::test_channel;
     use crate::core::utils::bit_reverse_index;
     use crate::core::vcs::blake2_merkle::{Blake2sMerkleChannel, Blake2sMerkleHasher};
@@ -996,14 +996,14 @@ mod tests {
             queries.insert(log_size, layer_queries);
         }
 
-        let (values, decommitment) = merkle.decommit(queries.clone(), cols.iter().collect_vec());
+        let (values, decommitment) = merkle.decommit(&queries, cols.iter().collect_vec());
 
         let verifier = MerkleVerifier {
             root: merkle.root(),
             column_log_sizes: log_sizes,
         };
 
-        verifier.verify(queries, values, decommitment).unwrap();
+        verifier.verify(&queries, values, decommitment).unwrap();
     }
 
     #[test]
