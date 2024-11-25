@@ -1,3 +1,4 @@
+use crate::constraint_framework::Relation;
 pub mod components;
 pub mod gen;
 
@@ -9,7 +10,9 @@ use components::{
 use gen::{gen_interaction_trace, gen_trace};
 use itertools::{chain, Itertools};
 
-use crate::constraint_framework::preprocessed_columns::gen_is_first;
+use crate::constraint_framework::preprocessed_columns::{
+    gen_preprocessed_columns, PreprocessedColumn,
+};
 use crate::constraint_framework::TraceLocationAllocator;
 use crate::core::backend::simd::m31::LOG_N_LANES;
 use crate::core::backend::simd::SimdBackend;
@@ -50,8 +53,18 @@ pub fn prove_state_machine(
     );
 
     // Setup protocol.
-    let commitment_scheme =
-        &mut CommitmentSchemeProver::<_, Blake2sMerkleChannel>::new(config, &twiddles);
+    let mut commitment_scheme =
+        CommitmentSchemeProver::<_, Blake2sMerkleChannel>::new(config, &twiddles);
+
+    let preprocessed_columns = [
+        PreprocessedColumn::IsFirst(x_axis_log_rows),
+        PreprocessedColumn::IsFirst(y_axis_log_rows),
+    ];
+
+    // Preprocessed trace.
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(gen_preprocessed_columns(preprocessed_columns.iter()));
+    tree_builder.commit(channel);
 
     // Trace.
     let trace_op0 = gen_trace(x_axis_log_rows, initial_state, 0);
@@ -86,14 +99,6 @@ pub fn prove_state_machine(
     tree_builder.extend_evals(chain![interaction_trace_op0, interaction_trace_op1].collect_vec());
     tree_builder.commit(channel);
 
-    // Constant trace.
-    let mut tree_builder = commitment_scheme.tree_builder();
-    tree_builder.extend_evals(vec![
-        gen_is_first(x_axis_log_rows),
-        gen_is_first(y_axis_log_rows),
-    ]);
-    tree_builder.commit(channel);
-
     // Prove constraints.
     let mut tree_span_provider = &mut TraceLocationAllocator::default();
     let component0 = StateMachineOp0Component::new(
@@ -104,6 +109,7 @@ pub fn prove_state_machine(
             total_sum: total_sum_op0,
             claimed_sum: (claimed_sum_op0, x_row as usize - 1),
         },
+        (total_sum_op0, Some((claimed_sum_op0, x_row as usize - 1))),
     );
     let component1 = StateMachineOp1Component::new(
         tree_span_provider,
@@ -113,7 +119,11 @@ pub fn prove_state_machine(
             total_sum: total_sum_op1,
             claimed_sum: (claimed_sum_op1, y_row as usize - 1),
         },
+        (total_sum_op1, Some((claimed_sum_op1, y_row as usize - 1))),
     );
+
+    tree_span_provider.validate_preprocessed_columns(&preprocessed_columns);
+
     let components = StateMachineComponents {
         component0,
         component1,
@@ -138,9 +148,12 @@ pub fn verify_state_machine(
     // Decommit.
     // Retrieve the expected column sizes in each commitment interaction, from the AIR.
     let sizes = proof.stmt0.log_sizes();
+
+    // Preprocessed columns.
+    commitment_scheme.commit(proof.stark_proof.commitments[0], &sizes[0], channel);
     // Trace columns.
     proof.stmt0.mix_into(channel);
-    commitment_scheme.commit(proof.stark_proof.commitments[0], &sizes[0], channel);
+    commitment_scheme.commit(proof.stark_proof.commitments[1], &sizes[1], channel);
 
     // Assert state machine statement.
     let lookup_elements = StateMachineElements::draw(channel);
@@ -155,8 +168,6 @@ pub fn verify_state_machine(
 
     // Interaction columns.
     proof.stmt1.mix_into(channel);
-    commitment_scheme.commit(proof.stark_proof.commitments[1], &sizes[1], channel);
-    // Constant columns.
     commitment_scheme.commit(proof.stark_proof.commitments[2], &sizes[2], channel);
 
     verify(
@@ -176,8 +187,11 @@ mod tests {
     };
     use super::gen::{gen_interaction_trace, gen_trace};
     use super::{prove_state_machine, verify_state_machine};
+    use crate::constraint_framework::expr::ExprEvaluator;
     use crate::constraint_framework::preprocessed_columns::gen_is_first;
-    use crate::constraint_framework::{assert_constraints, FrameworkEval, TraceLocationAllocator};
+    use crate::constraint_framework::{
+        assert_constraints, FrameworkEval, Relation, TraceLocationAllocator,
+    };
     use crate::core::channel::Blake2sChannel;
     use crate::core::fields::m31::M31;
     use crate::core::fields::qm31::QM31;
@@ -206,17 +220,23 @@ mod tests {
                 total_sum,
                 claimed_sum: (total_sum, (1 << log_n_rows) - 1),
             },
+            (total_sum, Some((total_sum, (1 << log_n_rows) - 1))),
         );
 
         let trace = TreeVec::new(vec![
+            vec![gen_is_first(log_n_rows)],
             trace,
             interaction_trace,
-            vec![gen_is_first(log_n_rows)],
         ]);
         let trace_polys = trace.map_cols(|c| c.interpolate());
-        assert_constraints(&trace_polys, CanonicCoset::new(log_n_rows), |eval| {
-            component.evaluate(eval);
-        });
+        assert_constraints(
+            &trace_polys,
+            CanonicCoset::new(log_n_rows),
+            |eval| {
+                component.evaluate(eval);
+            },
+            (total_sum, Some((total_sum, (1 << log_n_rows) - 1))),
+        );
     }
 
     #[test]
@@ -254,5 +274,64 @@ mod tests {
             prove_state_machine(log_n_rows, initial_state, config, prover_channel);
 
         verify_state_machine(config, verifier_channel, components, proof).unwrap();
+    }
+
+    #[test]
+    fn test_state_machine_constraint_repr() {
+        let log_n_rows = 8;
+        let initial_state = [M31::zero(); STATE_SIZE];
+
+        let trace = gen_trace(log_n_rows, initial_state, 0);
+        let lookup_elements = StateMachineElements::draw(&mut Blake2sChannel::default());
+
+        let (_, [total_sum, claimed_sum]) =
+            gen_interaction_trace(1 << log_n_rows, &trace, 0, &lookup_elements);
+
+        assert_eq!(total_sum, claimed_sum);
+        let component = StateMachineOp0Component::new(
+            &mut TraceLocationAllocator::default(),
+            StateTransitionEval {
+                log_n_rows,
+                lookup_elements,
+                total_sum,
+                claimed_sum: (total_sum, (1 << log_n_rows) - 1),
+            },
+            (total_sum, Some((total_sum, (1 << log_n_rows) - 1))),
+        );
+
+        let eval = component.evaluate(ExprEvaluator::new(log_n_rows, true));
+
+        assert_eq!(eval.constraints.len(), 2);
+        let constraint0_str = "(1) \
+            * ((SecureCol(\
+                col_2_5[claimed_sum_offset], \
+                col_2_8[claimed_sum_offset], \
+                col_2_11[claimed_sum_offset], \
+                col_2_14[claimed_sum_offset]\
+            ) - (claimed_sum)) \
+                * (col_0_2[0]))";
+        assert_eq!(eval.constraints[0].format_expr(), constraint0_str);
+        let constraint1_str = "(1) \
+            * ((SecureCol(col_2_3[0], col_2_6[0], col_2_9[0], col_2_12[0]) \
+                - (SecureCol(col_2_4[-1], col_2_7[-1], col_2_10[-1], col_2_13[-1]) \
+                    - ((col_0_2[0]) * (total_sum))) \
+                - (0)) \
+                * ((0 \
+                    + (StateMachineElements_alpha0) * (col_1_0[0]) \
+                    + (StateMachineElements_alpha1) * (col_1_1[0]) \
+                    - (StateMachineElements_z)) \
+                    * (0 + (StateMachineElements_alpha0) * (col_1_0[0] + 1) \
+                        + (StateMachineElements_alpha1) * (col_1_1[0]) \
+                        - (StateMachineElements_z))) \
+                - ((0 \
+                    + (StateMachineElements_alpha0) * (col_1_0[0] + 1) \
+                    + (StateMachineElements_alpha1) * (col_1_1[0]) \
+                    - (StateMachineElements_z)) \
+                    * (1) \
+                    + (0 + (StateMachineElements_alpha0) * (col_1_0[0]) \
+                        + (StateMachineElements_alpha1) * (col_1_1[0]) \
+                        - (StateMachineElements_z)) \
+                        * (-(1))))";
+        assert_eq!(eval.constraints[1].format_expr(), constraint1_str);
     }
 }

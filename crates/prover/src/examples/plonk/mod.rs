@@ -2,13 +2,11 @@ use itertools::Itertools;
 use num_traits::One;
 use tracing::{span, Level};
 
-use crate::constraint_framework::logup::{
-    ClaimedPrefixSum, LogupAtRow, LogupTraceGenerator, LookupElements,
-};
+use crate::constraint_framework::logup::{ClaimedPrefixSum, LogupTraceGenerator, LookupElements};
 use crate::constraint_framework::preprocessed_columns::{gen_is_first, PreprocessedColumn};
 use crate::constraint_framework::{
-    assert_constraints, EvalAtRow, FrameworkComponent, FrameworkEval, TraceLocationAllocator,
-    INTERACTION_TRACE_IDX,
+    assert_constraints, relation, EvalAtRow, FrameworkComponent, FrameworkEval, RelationEntry,
+    TraceLocationAllocator,
 };
 use crate::core::backend::simd::column::BaseColumn;
 use crate::core::backend::simd::m31::LOG_N_LANES;
@@ -18,7 +16,6 @@ use crate::core::backend::Column;
 use crate::core::channel::Blake2sChannel;
 use crate::core::fields::m31::BaseField;
 use crate::core::fields::qm31::SecureField;
-use crate::core::lookups::utils::Fraction;
 use crate::core::pcs::{CommitmentSchemeProver, PcsConfig, TreeSubspan};
 use crate::core::poly::circle::{CanonicCoset, CircleEvaluation, PolyOps};
 use crate::core::poly::BitReversedOrder;
@@ -28,10 +25,13 @@ use crate::core::ColumnVec;
 
 pub type PlonkComponent = FrameworkComponent<PlonkEval>;
 
+// TODO(alont): Rename this and all other `LookupElements` types to `Relation`.
+relation!(PlonkLookupElements, 2);
+
 #[derive(Clone)]
 pub struct PlonkEval {
     pub log_n_rows: u32,
-    pub lookup_elements: LookupElements<2>,
+    pub lookup_elements: PlonkLookupElements,
     pub claimed_sum: ClaimedPrefixSum,
     pub total_sum: SecureField,
     pub base_trace_location: TreeSubspan,
@@ -49,14 +49,6 @@ impl FrameworkEval for PlonkEval {
     }
 
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let is_first = eval.get_preprocessed_column(PreprocessedColumn::IsFirst(self.log_size()));
-        let mut logup = LogupAtRow::<_>::new(
-            INTERACTION_TRACE_IDX,
-            self.total_sum,
-            Some(self.claimed_sum),
-            is_first,
-        );
-
         let a_wire = eval.get_preprocessed_column(PreprocessedColumn::Plonk(0));
         let b_wire = eval.get_preprocessed_column(PreprocessedColumn::Plonk(1));
         // Note: c_wire could also be implicit: (self.eval.point() - M31_CIRCLE_GEN.into_ef()).x.
@@ -74,22 +66,18 @@ impl FrameworkEval for PlonkEval {
                 + (E::F::one() - op) * a_val.clone() * b_val.clone(),
         );
 
-        let denom_a: E::EF = self.lookup_elements.combine(&[a_wire, a_val]);
-        let denom_b: E::EF = self.lookup_elements.combine(&[b_wire, b_val]);
+        eval.add_to_relation(&[
+            RelationEntry::new(&self.lookup_elements, E::EF::one(), &[a_wire, a_val]),
+            RelationEntry::new(&self.lookup_elements, E::EF::one(), &[b_wire, b_val]),
+        ]);
 
-        logup.write_frac(
-            &mut eval,
-            Fraction::new(denom_a.clone() + denom_b.clone(), denom_a * denom_b),
-        );
-        logup.write_frac(
-            &mut eval,
-            Fraction::new(
-                (-mult).into(),
-                self.lookup_elements.combine(&[c_wire, c_val]),
-            ),
-        );
+        eval.add_to_relation(&[RelationEntry::new(
+            &self.lookup_elements,
+            (-mult).into(),
+            &[c_wire, c_val],
+        )]);
 
-        logup.finalize(&mut eval);
+        eval.finalize_logup();
         eval
     }
 }
@@ -195,8 +183,31 @@ pub fn prove_fibonacci_plonk(
 
     // Setup protocol.
     let channel = &mut Blake2sChannel::default();
-    let commitment_scheme =
-        &mut CommitmentSchemeProver::<_, Blake2sMerkleChannel>::new(config, &twiddles);
+    let mut commitment_scheme =
+        CommitmentSchemeProver::<_, Blake2sMerkleChannel>::new(config, &twiddles);
+
+    // Preprocessed trace.
+    let span = span!(Level::INFO, "Constant").entered();
+    let mut tree_builder = commitment_scheme.tree_builder();
+    let is_first = gen_is_first(log_n_rows);
+    let mut constant_trace = [
+        circuit.a_wire.clone(),
+        circuit.b_wire.clone(),
+        circuit.c_wire.clone(),
+        circuit.op.clone(),
+    ]
+    .into_iter()
+    .map(|col| {
+        CircleEvaluation::<SimdBackend, _, BitReversedOrder>::new(
+            CanonicCoset::new(log_n_rows).circle_domain(),
+            col,
+        )
+    })
+    .collect_vec();
+    constant_trace.push(is_first);
+    let constants_trace_location = tree_builder.extend_evals(constant_trace);
+    tree_builder.commit(channel);
+    span.exit();
 
     // Trace.
     let span = span!(Level::INFO, "Trace").entered();
@@ -207,35 +218,16 @@ pub fn prove_fibonacci_plonk(
     span.exit();
 
     // Draw lookup element.
-    let lookup_elements = LookupElements::draw(channel);
+    let lookup_elements = PlonkLookupElements::draw(channel);
 
     // Interaction trace.
     let span = span!(Level::INFO, "Interaction").entered();
     let (trace, [total_sum, claimed_sum]) =
-        gen_interaction_trace(log_n_rows, padding_offset, &circuit, &lookup_elements);
+        gen_interaction_trace(log_n_rows, padding_offset, &circuit, &lookup_elements.0);
     let mut tree_builder = commitment_scheme.tree_builder();
     let interaction_trace_location = tree_builder.extend_evals(trace);
     tree_builder.commit(channel);
     span.exit();
-
-    // Constant trace.
-    let span = span!(Level::INFO, "Constant").entered();
-    let mut tree_builder = commitment_scheme.tree_builder();
-    let is_first = gen_is_first(log_n_rows);
-    let mut constant_trace = [circuit.a_wire, circuit.b_wire, circuit.c_wire, circuit.op]
-        .into_iter()
-        .map(|col| {
-            CircleEvaluation::<SimdBackend, _, BitReversedOrder>::new(
-                CanonicCoset::new(log_n_rows).circle_domain(),
-                col,
-            )
-        })
-        .collect_vec();
-    constant_trace.insert(0, is_first);
-    let constants_trace_location = tree_builder.extend_evals(constant_trace);
-    tree_builder.commit(channel);
-    span.exit();
-
     // Prove constraints.
     let component = PlonkComponent::new(
         &mut TraceLocationAllocator::default(),
@@ -248,6 +240,7 @@ pub fn prove_fibonacci_plonk(
             interaction_trace_location,
             constants_trace_location,
         },
+        (total_sum, Some((claimed_sum, padding_offset))),
     );
 
     // Sanity check. Remove for production.
@@ -255,9 +248,14 @@ pub fn prove_fibonacci_plonk(
         .trees
         .as_ref()
         .map(|t| t.polynomials.iter().cloned().collect_vec());
-    assert_constraints(&trace_polys, CanonicCoset::new(log_n_rows), |mut eval| {
-        component.evaluate(eval);
-    });
+    assert_constraints(
+        &trace_polys,
+        CanonicCoset::new(log_n_rows),
+        |mut eval| {
+            component.evaluate(eval);
+        },
+        (total_sum, Some((claimed_sum, padding_offset))),
+    );
 
     let proof = prove(&[&component], channel, commitment_scheme).unwrap();
 
@@ -268,14 +266,13 @@ pub fn prove_fibonacci_plonk(
 mod tests {
     use std::env;
 
-    use crate::constraint_framework::logup::LookupElements;
     use crate::core::air::Component;
     use crate::core::channel::Blake2sChannel;
     use crate::core::fri::FriConfig;
     use crate::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
     use crate::core::prover::verify;
     use crate::core::vcs::blake2_merkle::Blake2sMerkleChannel;
-    use crate::examples::plonk::prove_fibonacci_plonk;
+    use crate::examples::plonk::{prove_fibonacci_plonk, PlonkLookupElements};
 
     #[test_log::test]
     fn test_simd_plonk_prove() {
@@ -300,14 +297,16 @@ mod tests {
         // Decommit.
         // Retrieve the expected column sizes in each commitment interaction, from the AIR.
         let sizes = component.trace_log_degree_bounds();
-        // Trace columns.
+
+        // Preprocessed columns.
         commitment_scheme.commit(proof.commitments[0], &sizes[0], channel);
+
+        // Trace columns.
+        commitment_scheme.commit(proof.commitments[1], &sizes[1], channel);
         // Draw lookup element.
-        let lookup_elements = LookupElements::<2>::draw(channel);
+        let lookup_elements = PlonkLookupElements::draw(channel);
         assert_eq!(lookup_elements, component.lookup_elements);
         // Interaction columns.
-        commitment_scheme.commit(proof.commitments[1], &sizes[1], channel);
-        // Constant columns.
         commitment_scheme.commit(proof.commitments[2], &sizes[2], channel);
 
         verify(&[&component], channel, commitment_scheme, proof).unwrap();

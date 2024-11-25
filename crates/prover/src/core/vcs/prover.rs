@@ -38,7 +38,12 @@ impl<B: MerkleOps<H>, H: MerkleHasher> MerkleProver<B, H> {
     ///
     /// A new instance of `MerkleProver` with the committed layers.
     pub fn commit(columns: Vec<&Col<B, BaseField>>) -> Self {
-        assert!(!columns.is_empty());
+        if columns.is_empty() {
+            return Self {
+                layers: vec![B::commit_on_layer(0, None, &[])], //TODO: does our Merkle support this?
+            };
+        }
+
         if B::COMMIT_IMPLEMENTED {
             Self { layers: B::commit_columns(columns) }
         } else {
@@ -84,18 +89,9 @@ impl<B: MerkleOps<H>, H: MerkleHasher> MerkleProver<B, H> {
     /// * A `MerkleDecommitment` containing the hash and column witnesses.
     pub fn decommit(
         &self,
-        queries_per_log_size: BTreeMap<u32, Vec<usize>>,
+        queries_per_log_size: &BTreeMap<u32, Vec<usize>>,
         columns: Vec<&Col<B, BaseField>>,
     ) -> (ColumnVec<Vec<BaseField>>, MerkleDecommitment<H>) {
-        // Check that queries are sorted and deduped.
-        // TODO(andrew): Consider using a Queries struct to prevent this.
-        for queries in queries_per_log_size.values() {
-            assert!(
-                queries.windows(2).all(|w| w[0] < w[1]),
-                "Queries are not sorted."
-            );
-        }
-
         // Prepare output buffers.
         let mut queried_values_by_layer = vec![];
         let mut decommitment = MerkleDecommitment::empty();

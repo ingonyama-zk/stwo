@@ -3,13 +3,14 @@
 use std::ops::{Add, AddAssign, Mul, Sub};
 
 use itertools::Itertools;
+use num_traits::One;
 use tracing::{info, span, Level};
 
-use crate::constraint_framework::logup::{LogupAtRow, LogupTraceGenerator, LookupElements};
+use crate::constraint_framework::logup::LogupTraceGenerator;
 use crate::constraint_framework::preprocessed_columns::gen_is_first;
 use crate::constraint_framework::{
-    EvalAtRow, FrameworkComponent, FrameworkEval, TraceLocationAllocator, INTERACTION_TRACE_IDX,
-    PREPROCESSED_TRACE_IDX,
+    relation, EvalAtRow, FrameworkComponent, FrameworkEval, Relation, RelationEntry,
+    TraceLocationAllocator,
 };
 use crate::core::backend::simd::column::BaseColumn;
 use crate::core::backend::simd::m31::{PackedBaseField, LOG_N_LANES};
@@ -20,7 +21,6 @@ use crate::core::channel::Blake2sChannel;
 use crate::core::fields::m31::BaseField;
 use crate::core::fields::qm31::SecureField;
 use crate::core::fields::FieldExpOps;
-use crate::core::lookups::utils::Reciprocal;
 use crate::core::pcs::{CommitmentSchemeProver, PcsConfig};
 use crate::core::poly::circle::{CanonicCoset, CircleEvaluation, PolyOps};
 use crate::core::poly::BitReversedOrder;
@@ -45,7 +45,7 @@ const INTERNAL_ROUND_CONSTS: [BaseField; N_PARTIAL_ROUNDS] =
 
 pub type PoseidonComponent = FrameworkComponent<PoseidonEval>;
 
-pub type PoseidonElements = LookupElements<N_STATE>;
+relation!(PoseidonElements, N_STATE);
 
 #[derive(Clone)]
 pub struct PoseidonEval {
@@ -61,9 +61,7 @@ impl FrameworkEval for PoseidonEval {
         self.log_n_rows + LOG_EXPAND
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let [is_first] = eval.next_interaction_mask(PREPROCESSED_TRACE_IDX, [0]);
-        let logup = LogupAtRow::new(INTERACTION_TRACE_IDX, self.total_sum, None, is_first);
-        eval_poseidon_constraints(&mut eval, logup, &self.lookup_elements);
+        eval_poseidon_constraints(&mut eval, &self.lookup_elements);
         eval
     }
 }
@@ -141,16 +139,12 @@ fn pow5<F: FieldExpOps>(x: F) -> F {
     x4 * x.clone()
 }
 
-pub fn eval_poseidon_constraints<E: EvalAtRow>(
-    eval: &mut E,
-    mut logup: LogupAtRow<E>,
-    lookup_elements: &PoseidonElements,
-) {
+pub fn eval_poseidon_constraints<E: EvalAtRow>(eval: &mut E, lookup_elements: &PoseidonElements) {
     for _ in 0..N_INSTANCES_PER_ROW {
         let mut state: [_; N_STATE] = std::array::from_fn(|_| eval.next_trace_mask());
 
         // Require state lookup.
-        let initial_state_denom: E::EF = lookup_elements.combine(&state);
+        let initial_state = state.clone();
 
         // 4 full rounds.
         (0..N_HALF_FULL_ROUNDS).for_each(|round| {
@@ -192,14 +186,13 @@ pub fn eval_poseidon_constraints<E: EvalAtRow>(
         });
 
         // Provide state lookups.
-        let final_state_denom: E::EF = lookup_elements.combine(&state);
-        logup.write_frac(
-            eval,
-            Reciprocal::new(initial_state_denom) - Reciprocal::new(final_state_denom),
-        );
+        eval.add_to_relation(&[
+            RelationEntry::new(lookup_elements, E::EF::one(), &initial_state),
+            RelationEntry::new(lookup_elements, -E::EF::one(), &state),
+        ])
     }
 
-    logup.finalize(eval);
+    eval.finalize_logup();
 }
 
 pub struct LookupData {
@@ -348,8 +341,16 @@ pub fn prove_poseidon(
 
     // Setup protocol.
     let channel = &mut Blake2sChannel::default();
-    let commitment_scheme =
-        &mut CommitmentSchemeProver::<_, Blake2sMerkleChannel>::new(config, &twiddles);
+    let mut commitment_scheme =
+        CommitmentSchemeProver::<_, Blake2sMerkleChannel>::new(config, &twiddles);
+
+    // Preprocessed trace.
+    let span = span!(Level::INFO, "Constant").entered();
+    let mut tree_builder = commitment_scheme.tree_builder();
+    let constant_trace = vec![gen_is_first(log_n_rows)];
+    tree_builder.extend_evals(constant_trace);
+    tree_builder.commit(channel);
+    span.exit();
 
     // Trace.
     let span = span!(Level::INFO, "Trace").entered();
@@ -370,14 +371,6 @@ pub fn prove_poseidon(
     tree_builder.commit(channel);
     span.exit();
 
-    // Constant trace.
-    let span = span!(Level::INFO, "Constant").entered();
-    let mut tree_builder = commitment_scheme.tree_builder();
-    let constant_trace = vec![gen_is_first(log_n_rows)];
-    tree_builder.extend_evals(constant_trace);
-    tree_builder.commit(channel);
-    span.exit();
-
     // Prove constraints.
     let component = PoseidonComponent::new(
         &mut TraceLocationAllocator::default(),
@@ -386,6 +379,7 @@ pub fn prove_poseidon(
             lookup_elements,
             total_sum,
         },
+        (total_sum, None),
     );
     info!("Poseidon component info:\n{}", component);
     let proof = prove(&[&component], channel, commitment_scheme).unwrap();
@@ -400,11 +394,8 @@ mod tests {
     use itertools::Itertools;
     use num_traits::One;
 
-    use crate::constraint_framework::logup::{LogupAtRow, LookupElements};
+    use crate::constraint_framework::assert_constraints;
     use crate::constraint_framework::preprocessed_columns::gen_is_first;
-    use crate::constraint_framework::{
-        assert_constraints, EvalAtRow, INTERACTION_TRACE_IDX, PREPROCESSED_TRACE_IDX,
-    };
     use crate::core::air::Component;
     use crate::core::channel::Blake2sChannel;
     use crate::core::fields::m31::BaseField;
@@ -475,21 +466,21 @@ mod tests {
 
         // Trace.
         let (trace0, interaction_data) = gen_trace(LOG_N_ROWS);
-        let lookup_elements = LookupElements::dummy();
+        let lookup_elements = PoseidonElements::dummy();
         let (trace1, total_sum) =
             gen_interaction_trace(LOG_N_ROWS, interaction_data, &lookup_elements);
 
-        let traces = TreeVec::new(vec![trace0, trace1, vec![gen_is_first(LOG_N_ROWS)]]);
+        let traces = TreeVec::new(vec![vec![gen_is_first(LOG_N_ROWS)], trace0, trace1]);
         let trace_polys =
             traces.map(|trace| trace.into_iter().map(|c| c.interpolate()).collect_vec());
-        assert_constraints(&trace_polys, CanonicCoset::new(LOG_N_ROWS), |mut eval| {
-            let [is_first] = eval.next_interaction_mask(PREPROCESSED_TRACE_IDX, [0]);
-            eval_poseidon_constraints(
-                &mut eval,
-                LogupAtRow::new(INTERACTION_TRACE_IDX, total_sum, None, is_first),
-                &lookup_elements,
-            );
-        });
+        assert_constraints(
+            &trace_polys,
+            CanonicCoset::new(LOG_N_ROWS),
+            |mut eval| {
+                eval_poseidon_constraints(&mut eval, &lookup_elements);
+            },
+            (total_sum, None),
+        );
     }
 
     #[test_log::test]
@@ -520,15 +511,15 @@ mod tests {
         // Decommit.
         // Retrieve the expected column sizes in each commitment interaction, from the AIR.
         let sizes = component.trace_log_degree_bounds();
-        // Trace columns.
+
+        // Preprocessed columns.
         commitment_scheme.commit(proof.commitments[0], &sizes[0], channel);
+        // Trace columns.
+        commitment_scheme.commit(proof.commitments[1], &sizes[1], channel);
         // Draw lookup element.
         let lookup_elements = PoseidonElements::draw(channel);
         assert_eq!(lookup_elements, component.lookup_elements);
         // Interaction columns.
-        commitment_scheme.commit(proof.commitments[1], &sizes[1], channel);
-
-        // Constant columns.
         commitment_scheme.commit(proof.commitments[2], &sizes[2], channel);
 
         verify(&[&component], channel, commitment_scheme, proof).unwrap();

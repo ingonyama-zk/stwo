@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::fmt::{self, Display, Formatter};
 use std::iter::zip;
 use std::ops::Deref;
@@ -9,7 +10,11 @@ use rayon::prelude::*;
 use tracing::{span, Level};
 
 use super::cpu_domain::CpuDomainEvaluator;
-use super::{EvalAtRow, InfoEvaluator, PointEvaluator, SimdDomainEvaluator};
+use super::logup::LogupSums;
+use super::preprocessed_columns::PreprocessedColumn;
+use super::{
+    EvalAtRow, InfoEvaluator, PointEvaluator, SimdDomainEvaluator, PREPROCESSED_TRACE_IDX,
+};
 use crate::core::air::accumulation::{DomainEvaluationAccumulator, PointEvaluationAccumulator};
 use crate::core::air::{Component, ComponentProver, Trace};
 use crate::core::backend::simd::column::VeryPackedSecureColumnByCoords;
@@ -29,12 +34,23 @@ use crate::core::{utils, ColumnVec};
 
 const CHUNK_SIZE: usize = 1;
 
+#[derive(Debug, Default)]
+enum PreprocessedColumnsAllocationMode {
+    #[default]
+    Dynamic,
+    Static,
+}
+
 // TODO(andrew): Docs.
 // TODO(andrew): Consider better location for this.
 #[derive(Debug, Default)]
 pub struct TraceLocationAllocator {
     /// Mapping of tree index to next available column offset.
     next_tree_offsets: TreeVec<usize>,
+    /// Mapping of preprocessed columns to their index.
+    preprocessed_columns: HashMap<PreprocessedColumn, usize>,
+    /// Controls whether the preprocessed columns are dynamic or static (default=Dynamic).
+    preprocessed_columns_allocation_mode: PreprocessedColumnsAllocationMode,
 }
 
 impl TraceLocationAllocator {
@@ -62,6 +78,34 @@ impl TraceLocationAllocator {
                 .collect(),
         )
     }
+
+    /// Create a new `TraceLocationAllocator` with fixed preprocessed columns setup.
+    pub fn new_with_preproccessed_columns(preprocessed_columns: &[PreprocessedColumn]) -> Self {
+        Self {
+            next_tree_offsets: Default::default(),
+            preprocessed_columns: preprocessed_columns
+                .iter()
+                .enumerate()
+                .map(|(i, &col)| (col, i))
+                .collect(),
+            preprocessed_columns_allocation_mode: PreprocessedColumnsAllocationMode::Static,
+        }
+    }
+
+    pub fn preprocessed_columns(&self) -> &HashMap<PreprocessedColumn, usize> {
+        &self.preprocessed_columns
+    }
+
+    // validates that `self.preprocessed_columns` is consistent with
+    // `preprocessed_columns`.
+    // I.e. preprocessed_columns[i] == self.preprocessed_columns[i].
+    pub fn validate_preprocessed_columns(&self, preprocessed_columns: &[PreprocessedColumn]) {
+        assert_eq!(preprocessed_columns.len(), self.preprocessed_columns.len());
+
+        for (column, idx) in self.preprocessed_columns.iter() {
+            assert_eq!(Some(column), preprocessed_columns.get(*idx));
+        }
+    }
 }
 
 /// A component defined solely in means of the constraints framework.
@@ -80,16 +124,48 @@ pub struct FrameworkComponent<C: FrameworkEval> {
     eval: C,
     trace_locations: TreeVec<TreeSubspan>,
     info: InfoEvaluator,
+    preprocessed_column_indices: Vec<usize>,
+    logup_sums: LogupSums,
 }
 
 impl<E: FrameworkEval> FrameworkComponent<E> {
-    pub fn new(location_allocator: &mut TraceLocationAllocator, eval: E) -> Self {
-        let info = eval.evaluate(InfoEvaluator::default());
+    pub fn new(
+        location_allocator: &mut TraceLocationAllocator,
+        eval: E,
+        logup_sums: LogupSums,
+    ) -> Self {
+        let info = eval.evaluate(InfoEvaluator::new(eval.log_size(), vec![], logup_sums));
         let trace_locations = location_allocator.next_for_structure(&info.mask_offsets);
+
+        let preprocessed_column_indices = info
+            .preprocessed_columns
+            .iter()
+            .map(|col| {
+                let next_column = location_allocator.preprocessed_columns.len();
+                *location_allocator
+                    .preprocessed_columns
+                    .entry(*col)
+                    .or_insert_with(|| {
+                        if matches!(
+                            location_allocator.preprocessed_columns_allocation_mode,
+                            PreprocessedColumnsAllocationMode::Static
+                        ) {
+                            panic!(
+                                "Preprocessed column {:?} is missing from static alloction",
+                                col
+                            );
+                        }
+
+                        next_column
+                    })
+            })
+            .collect();
         Self {
             eval,
             trace_locations,
             info,
+            preprocessed_column_indices,
+            logup_sums,
         }
     }
 
@@ -108,10 +184,19 @@ impl<E: FrameworkEval> Component for FrameworkComponent<E> {
     }
 
     fn trace_log_degree_bounds(&self) -> TreeVec<ColumnVec<u32>> {
-        self.info
+        let mut log_degree_bounds = self
+            .info
             .mask_offsets
             .as_ref()
-            .map(|tree_offsets| vec![self.eval.log_size(); tree_offsets.len()])
+            .map(|tree_offsets| vec![self.eval.log_size(); tree_offsets.len()]);
+
+        log_degree_bounds[0] = self
+            .preprocessed_column_indices
+            .iter()
+            .map(|_| self.eval.log_size())
+            .collect();
+
+        log_degree_bounds
     }
 
     fn mask_points(
@@ -127,16 +212,31 @@ impl<E: FrameworkEval> Component for FrameworkComponent<E> {
         })
     }
 
+    fn preproccessed_column_indices(&self) -> ColumnVec<usize> {
+        self.preprocessed_column_indices.clone()
+    }
+
     fn evaluate_constraint_quotients_at_point(
         &self,
         point: CirclePoint<SecureField>,
         mask: &TreeVec<ColumnVec<Vec<SecureField>>>,
         evaluation_accumulator: &mut PointEvaluationAccumulator,
     ) {
+        let preprocessed_mask = self
+            .preprocessed_column_indices
+            .iter()
+            .map(|idx| &mask[PREPROCESSED_TRACE_IDX][*idx])
+            .collect_vec();
+
+        let mut mask_points = mask.sub_tree(&self.trace_locations);
+        mask_points[PREPROCESSED_TRACE_IDX] = preprocessed_mask;
+
         self.eval.evaluate(PointEvaluator::new(
-            mask.sub_tree(&self.trace_locations),
+            mask_points,
             evaluation_accumulator,
             coset_vanishing(CanonicCoset::new(self.eval.log_size()).coset, point).inverse(),
+            self.eval.log_size(),
+            self.logup_sums,
         ));
     }
 }
@@ -154,8 +254,19 @@ impl<E: FrameworkEval + Sync> ComponentProver<SimdBackend> for FrameworkComponen
         let eval_domain = CanonicCoset::new(self.max_constraint_log_degree_bound()).circle_domain();
         let trace_domain = CanonicCoset::new(self.eval.log_size());
 
-        let component_polys = trace.polys.sub_tree(&self.trace_locations);
-        let component_evals = trace.evals.sub_tree(&self.trace_locations);
+        let mut component_polys = trace.polys.sub_tree(&self.trace_locations);
+        component_polys[PREPROCESSED_TRACE_IDX] = self
+            .preprocessed_column_indices
+            .iter()
+            .map(|idx| &trace.polys[PREPROCESSED_TRACE_IDX][*idx])
+            .collect();
+
+        let mut component_evals = trace.evals.sub_tree(&self.trace_locations);
+        component_evals[PREPROCESSED_TRACE_IDX] = self
+            .preprocessed_column_indices
+            .iter()
+            .map(|idx| &trace.evals[PREPROCESSED_TRACE_IDX][*idx])
+            .collect();
 
         // Extend trace if necessary.
         // TODO: Don't extend when eval_size < committed_size. Instead, pick a good
@@ -205,6 +316,8 @@ impl<E: FrameworkEval + Sync> ComponentProver<SimdBackend> for FrameworkComponen
                     &accum.random_coeff_powers,
                     trace_domain.log_size(),
                     eval_domain.log_size(),
+                    self.eval.log_size(),
+                    self.logup_sums,
                 );
                 let row_res = self.eval.evaluate(eval).row_res;
 
@@ -230,6 +343,11 @@ impl<E: FrameworkEval + Sync> ComponentProver<SimdBackend> for FrameworkComponen
             .step_by(CHUNK_SIZE)
             .zip(col.chunks_mut(CHUNK_SIZE));
 
+        // Define any `self` values outside the loop to prevent the compiler thinking there is a
+        // `Sync` requirement on `Self`.
+        let self_eval = &self.eval;
+        let self_logup_sums = self.logup_sums;
+
         iter.for_each(|(chunk_idx, mut chunk)| {
             let trace_cols = trace.as_cols_ref().map_cols(|c| c.as_ref());
 
@@ -242,8 +360,10 @@ impl<E: FrameworkEval + Sync> ComponentProver<SimdBackend> for FrameworkComponen
                     &accum.random_coeff_powers,
                     trace_domain.log_size(),
                     eval_domain.log_size(),
+                    self_eval.log_size(),
+                    self_logup_sums,
                 );
-                let row_res = self.eval.evaluate(eval).row_res;
+                let row_res = self_eval.evaluate(eval).row_res;
 
                 // Finalize row.
                 unsafe {

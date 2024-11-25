@@ -2,21 +2,22 @@ use std::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub};
 
 use num_traits::{One, Zero};
 
-use super::EvalAtRow;
-use crate::core::fields::m31::BaseField;
+use super::{EvalAtRow, Relation, RelationEntry, INTERACTION_TRACE_IDX};
+use crate::core::fields::m31::{self, BaseField};
 use crate::core::fields::qm31::SecureField;
 use crate::core::fields::FieldExpOps;
+use crate::core::lookups::utils::Fraction;
 
 /// A single base field column at index `idx` of interaction `interaction`, at mask offset `offset`.
 #[derive(Clone, Debug, PartialEq)]
-struct ColumnExpr {
+pub struct ColumnExpr {
     interaction: usize,
     idx: usize,
-    offset: usize,
+    offset: isize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-enum Expr {
+pub enum Expr {
     Col(ColumnExpr),
     /// An atomic secure column constructed from 4 expressions.
     /// Expressions on the secure column are not reduced, i.e,
@@ -25,11 +26,47 @@ enum Expr {
     /// `SecureCol(Add(a0, b0), Add(a1, b1), Add(a2, b2), Add(a3, b3))`
     SecureCol([Box<Expr>; 4]),
     Const(BaseField),
+    /// Formal parameter to the AIR, for example the interaction elements of a relation.
+    Param(String),
     Add(Box<Expr>, Box<Expr>),
     Sub(Box<Expr>, Box<Expr>),
     Mul(Box<Expr>, Box<Expr>),
     Neg(Box<Expr>),
     Inv(Box<Expr>),
+}
+
+impl Expr {
+    #[allow(dead_code)]
+    pub fn format_expr(&self) -> String {
+        match self {
+            Expr::Col(ColumnExpr {
+                interaction,
+                idx,
+                offset,
+            }) => {
+                let offset_str = if *offset == CLAIMED_SUM_DUMMY_OFFSET.try_into().unwrap() {
+                    "claimed_sum_offset".to_string()
+                } else {
+                    offset.to_string()
+                };
+                format!("col_{interaction}_{idx}[{offset_str}]")
+            }
+            Expr::SecureCol([a, b, c, d]) => format!(
+                "SecureCol({}, {}, {}, {})",
+                a.format_expr(),
+                b.format_expr(),
+                c.format_expr(),
+                d.format_expr()
+            ),
+            Expr::Const(c) => c.0.to_string(),
+            Expr::Param(v) => v.to_string(),
+            Expr::Add(a, b) => format!("{} + {}", a.format_expr(), b.format_expr()),
+            Expr::Sub(a, b) => format!("{} - ({})", a.format_expr(), b.format_expr()),
+            Expr::Mul(a, b) => format!("({}) * ({})", a.format_expr(), b.format_expr()),
+            Expr::Neg(a) => format!("-({})", a.format_expr()),
+            Expr::Inv(a) => format!("1/({})", a.format_expr()),
+        }
+    }
 }
 
 impl From<BaseField> for Expr {
@@ -112,6 +149,13 @@ impl FieldExpOps for Expr {
     }
 }
 
+impl Add<BaseField> for Expr {
+    type Output = Self;
+    fn add(self, rhs: BaseField) -> Self {
+        self + Expr::from(rhs)
+    }
+}
+
 impl Mul<BaseField> for Expr {
     type Output = Self;
     fn mul(self, rhs: BaseField) -> Self {
@@ -146,11 +190,75 @@ impl AddAssign<BaseField> for Expr {
     }
 }
 
+/// Returns the expression
+/// `value[0] * <relation>_alpha0 + value[1] * <relation>_alpha1 + ... - <relation>_z.`
+fn combine_formal<R: Relation<Expr, Expr>>(relation: &R, values: &[Expr]) -> Expr {
+    const Z_SUFFIX: &str = "_z";
+    const ALPHA_SUFFIX: &str = "_alpha";
+
+    let z = Expr::Param(relation.get_name().to_owned() + Z_SUFFIX);
+    let alpha_powers = (0..relation.get_size())
+        .map(|i| Expr::Param(relation.get_name().to_owned() + ALPHA_SUFFIX + &i.to_string()));
+    values
+        .iter()
+        .zip(alpha_powers)
+        .fold(Expr::zero(), |acc, (value, power)| {
+            acc + power * value.clone()
+        })
+        - z
+}
+
+pub struct FormalLogupAtRow {
+    pub interaction: usize,
+    pub total_sum: Expr,
+    pub claimed_sum: Option<(Expr, usize)>,
+    pub prev_col_cumsum: Expr,
+    pub cur_frac: Option<Fraction<Expr, Expr>>,
+    pub is_finalized: bool,
+    pub is_first: Expr,
+    pub log_size: u32,
+}
+
+// P is an offset no column can reach, it signifies the variable
+// offset, which is an input to the verifier.
+const CLAIMED_SUM_DUMMY_OFFSET: usize = m31::P as usize;
+
+impl FormalLogupAtRow {
+    pub fn new(interaction: usize, has_partial_sum: bool, log_size: u32) -> Self {
+        let total_sum_name = "total_sum".to_string();
+        let claimed_sum_name = "claimed_sum".to_string();
+
+        Self {
+            interaction,
+            // TODO(alont): Should these be Expr::SecureField?
+            total_sum: Expr::Param(total_sum_name),
+            claimed_sum: has_partial_sum
+                .then_some((Expr::Param(claimed_sum_name), CLAIMED_SUM_DUMMY_OFFSET)),
+            prev_col_cumsum: Expr::zero(),
+            cur_frac: None,
+            is_finalized: true,
+            is_first: Expr::zero(),
+            log_size,
+        }
+    }
+}
+
 /// An Evaluator that saves all constraint expressions.
-#[derive(Default)]
-struct ExprEvaluator {
-    cur_var_index: usize,
-    constraints: Vec<Expr>,
+pub struct ExprEvaluator {
+    pub cur_var_index: usize,
+    pub constraints: Vec<Expr>,
+    pub logup: FormalLogupAtRow,
+}
+
+impl ExprEvaluator {
+    #[allow(dead_code)]
+    pub fn new(log_size: u32, has_partial_sum: bool) -> Self {
+        Self {
+            cur_var_index: Default::default(),
+            constraints: Default::default(),
+            logup: FormalLogupAtRow::new(INTERACTION_TRACE_IDX, has_partial_sum, log_size),
+        }
+    }
 }
 
 impl EvalAtRow for ExprEvaluator {
@@ -167,7 +275,7 @@ impl EvalAtRow for ExprEvaluator {
             let col = ColumnExpr {
                 interaction,
                 idx: self.cur_var_index,
-                offset: offsets[i] as usize,
+                offset: offsets[i],
             };
             self.cur_var_index += 1;
             Expr::Col(col)
@@ -189,6 +297,27 @@ impl EvalAtRow for ExprEvaluator {
             Box::new(values[3].clone()),
         ])
     }
+
+    fn add_to_relation<R: Relation<Self::F, Self::EF>>(
+        &mut self,
+        entries: &[RelationEntry<'_, Self::F, Self::EF, R>],
+    ) {
+        let fracs: Vec<Fraction<Self::EF, Self::EF>> = entries
+            .iter()
+            .map(
+                |RelationEntry {
+                     relation,
+                     multiplicity,
+                     values,
+                 }| {
+                    Fraction::new(multiplicity.clone(), combine_formal(*relation, values))
+                },
+            )
+            .collect();
+        self.write_logup_frac(fracs.into_iter().sum());
+    }
+
+    super::logup_proxy!();
 }
 
 #[cfg(test)]
@@ -196,13 +325,17 @@ mod tests {
     use num_traits::One;
 
     use crate::constraint_framework::expr::{ColumnExpr, Expr, ExprEvaluator};
-    use crate::constraint_framework::{EvalAtRow, FrameworkEval, ORIGINAL_TRACE_IDX};
+    use crate::constraint_framework::{
+        relation, EvalAtRow, FrameworkEval, RelationEntry, ORIGINAL_TRACE_IDX,
+    };
+    use crate::core::fields::m31::M31;
     use crate::core::fields::FieldExpOps;
+
     #[test]
     fn test_expr_eval() {
         let test_struct = TestStruct {};
-        let eval = test_struct.evaluate(ExprEvaluator::default());
-        assert_eq!(eval.constraints.len(), 1);
+        let eval = test_struct.evaluate(ExprEvaluator::new(16, false));
+        assert_eq!(eval.constraints.len(), 2);
         assert_eq!(
             eval.constraints[0],
             Expr::Mul(
@@ -242,7 +375,139 @@ mod tests {
                 ))
             )
         );
+
+        assert_eq!(
+            eval.constraints[1],
+            Expr::Mul(
+                Box::new(Expr::Const(M31(1))),
+                Box::new(Expr::Sub(
+                    Box::new(Expr::Mul(
+                        Box::new(Expr::Sub(
+                            Box::new(Expr::Sub(
+                                Box::new(Expr::SecureCol([
+                                    Box::new(Expr::Col(ColumnExpr {
+                                        interaction: 2,
+                                        idx: 4,
+                                        offset: 0
+                                    })),
+                                    Box::new(Expr::Col(ColumnExpr {
+                                        interaction: 2,
+                                        idx: 6,
+                                        offset: 0
+                                    })),
+                                    Box::new(Expr::Col(ColumnExpr {
+                                        interaction: 2,
+                                        idx: 8,
+                                        offset: 0
+                                    })),
+                                    Box::new(Expr::Col(ColumnExpr {
+                                        interaction: 2,
+                                        idx: 10,
+                                        offset: 0
+                                    }))
+                                ])),
+                                Box::new(Expr::Sub(
+                                    Box::new(Expr::SecureCol([
+                                        Box::new(Expr::Col(ColumnExpr {
+                                            interaction: 2,
+                                            idx: 5,
+                                            offset: -1
+                                        })),
+                                        Box::new(Expr::Col(ColumnExpr {
+                                            interaction: 2,
+                                            idx: 7,
+                                            offset: -1
+                                        })),
+                                        Box::new(Expr::Col(ColumnExpr {
+                                            interaction: 2,
+                                            idx: 9,
+                                            offset: -1
+                                        })),
+                                        Box::new(Expr::Col(ColumnExpr {
+                                            interaction: 2,
+                                            idx: 11,
+                                            offset: -1
+                                        }))
+                                    ])),
+                                    Box::new(Expr::Mul(
+                                        Box::new(Expr::Col(ColumnExpr {
+                                            interaction: 0,
+                                            idx: 3,
+                                            offset: 0
+                                        })),
+                                        Box::new(Expr::Param("total_sum".into()))
+                                    ))
+                                ))
+                            )),
+                            Box::new(Expr::Const(M31(0)))
+                        )),
+                        Box::new(Expr::Sub(
+                            Box::new(Expr::Add(
+                                Box::new(Expr::Add(
+                                    Box::new(Expr::Add(
+                                        Box::new(Expr::Const(M31(0))),
+                                        Box::new(Expr::Mul(
+                                            Box::new(Expr::Param(
+                                                "TestRelation_alpha0".to_string()
+                                            )),
+                                            Box::new(Expr::Col(ColumnExpr {
+                                                interaction: 1,
+                                                idx: 0,
+                                                offset: 0
+                                            }))
+                                        ))
+                                    )),
+                                    Box::new(Expr::Mul(
+                                        Box::new(Expr::Param("TestRelation_alpha1".to_string())),
+                                        Box::new(Expr::Col(ColumnExpr {
+                                            interaction: 1,
+                                            idx: 1,
+                                            offset: 0
+                                        }))
+                                    ))
+                                )),
+                                Box::new(Expr::Mul(
+                                    Box::new(Expr::Param("TestRelation_alpha2".to_string())),
+                                    Box::new(Expr::Col(ColumnExpr {
+                                        interaction: 1,
+                                        idx: 2,
+                                        offset: 0
+                                    }))
+                                ))
+                            )),
+                            Box::new(Expr::Param("TestRelation_z".to_string()))
+                        ))
+                    )),
+                    Box::new(Expr::Const(M31(1)))
+                ))
+            )
+        );
     }
+
+    #[test]
+    fn test_format_expr() {
+        let test_struct = TestStruct {};
+        let eval = test_struct.evaluate(ExprEvaluator::new(16, false));
+        let constraint0_str =  "(1) * ((((col_1_0[0]) * (col_1_1[0])) * (col_1_2[0])) * (1/(col_1_0[0] + col_1_1[0])))";
+        assert_eq!(eval.constraints[0].format_expr(), constraint0_str);
+        let constraint1_str = "(1) \
+            * ((SecureCol(col_2_4[0], col_2_6[0], col_2_8[0], col_2_10[0]) \
+                - (SecureCol(\
+                    col_2_5[-1], \
+                    col_2_7[-1], \
+                    col_2_9[-1], \
+                    col_2_11[-1]\
+                ) - ((col_0_3[0]) * (total_sum))) \
+                - (0)) \
+                * (0 + (TestRelation_alpha0) * (col_1_0[0]) \
+                    + (TestRelation_alpha1) * (col_1_1[0]) \
+                    + (TestRelation_alpha2) * (col_1_2[0]) \
+                    - (TestRelation_z)) \
+                - (1))";
+        assert_eq!(eval.constraints[1].format_expr(), constraint1_str);
+    }
+
+    relation!(TestRelation, 3);
 
     struct TestStruct {}
     impl FrameworkEval for TestStruct {
@@ -256,7 +521,15 @@ mod tests {
             let x0 = eval.next_trace_mask();
             let x1 = eval.next_trace_mask();
             let x2 = eval.next_trace_mask();
-            eval.add_constraint(x0.clone() * x1.clone() * x2 * (x0 + x1).inverse());
+            eval.add_constraint(
+                x0.clone() * x1.clone() * x2.clone() * (x0.clone() + x1.clone()).inverse(),
+            );
+            eval.add_to_relation(&[RelationEntry::new(
+                &TestRelation::dummy(),
+                E::EF::one(),
+                &[x0, x1, x2],
+            )]);
+            eval.finalize_logup();
             eval
         }
     }

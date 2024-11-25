@@ -7,16 +7,14 @@ use num_traits::Zero;
 
 use super::round::RoundElements;
 use super::N_ROUND_INPUT_FELTS;
-use crate::constraint_framework::logup::{LogupAtRow, LookupElements};
-use crate::constraint_framework::preprocessed_columns::PreprocessedColumn;
 use crate::constraint_framework::{
-    EvalAtRow, FrameworkComponent, FrameworkEval, InfoEvaluator, INTERACTION_TRACE_IDX,
+    relation, EvalAtRow, FrameworkComponent, FrameworkEval, InfoEvaluator,
 };
 use crate::core::fields::qm31::SecureField;
 
 pub type BlakeSchedulerComponent = FrameworkComponent<BlakeSchedulerEval>;
 
-pub type BlakeElements = LookupElements<N_ROUND_INPUT_FELTS>;
+relation!(BlakeElements, N_ROUND_INPUT_FELTS);
 
 pub struct BlakeSchedulerEval {
     pub log_size: u32,
@@ -32,12 +30,10 @@ impl FrameworkEval for BlakeSchedulerEval {
         self.log_size + 1
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let is_first = eval.get_preprocessed_column(PreprocessedColumn::IsFirst(self.log_size()));
         eval_blake_scheduler_constraints(
             &mut eval,
             &self.blake_lookup_elements,
             &self.round_lookup_elements,
-            LogupAtRow::new(INTERACTION_TRACE_IDX, self.total_sum, None, is_first),
         );
         eval
     }
@@ -50,7 +46,7 @@ pub fn blake_scheduler_info() -> InfoEvaluator {
         round_lookup_elements: RoundElements::dummy(),
         total_sum: SecureField::zero(),
     };
-    component.evaluate(InfoEvaluator::default())
+    component.evaluate(InfoEvaluator::empty())
 }
 
 #[cfg(test)]
@@ -91,7 +87,7 @@ mod tests {
             &blake_lookup_elements,
         );
 
-        let trace = TreeVec::new(vec![trace, interaction_trace, vec![gen_is_first(LOG_SIZE)]]);
+        let trace = TreeVec::new(vec![vec![gen_is_first(LOG_SIZE)], trace, interaction_trace]);
         let trace_polys = trace.map_cols(|c| c.interpolate());
 
         let component = BlakeSchedulerEval {
@@ -106,6 +102,7 @@ mod tests {
             |eval| {
                 component.evaluate(eval);
             },
+            (total_sum, None),
         )
     }
 }
