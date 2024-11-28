@@ -3,6 +3,8 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use itertools::Itertools;
 use stwo_prover::core::backend::cpu::CpuBackend;
+#[cfg(feature = "icicle")]
+use stwo_prover::core::backend::icicle::IcicleBackend;
 use stwo_prover::core::backend::simd::SimdBackend;
 use stwo_prover::core::circle::SECURE_FIELD_CIRCLE_GEN;
 use stwo_prover::core::fields::m31::BaseField;
@@ -45,6 +47,8 @@ fn bench_quotients<B: QuotientOps, const LOG_N_ROWS: u32, const LOG_N_COLS: u32>
 
 fn quotients_benches(c: &mut Criterion) {
     bench_quotients::<SimdBackend, 20, 8>(c, "simd");
+    #[cfg(feature = "icicle")]
+    bench_quotients::<IcicleBackend, 20, 8>(c, "icicle");
     bench_quotients::<CpuBackend, 16, 8>(c, "cpu");
 }
 

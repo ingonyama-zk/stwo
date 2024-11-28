@@ -14,6 +14,7 @@ use icicle_m31::dcct::{evaluate, get_dcct_root_of_unity, initialize_dcct_domain,
 use icicle_m31::fri::{self, fold_circle_into_line, FriConfig};
 use icicle_hash::blake2s::build_blake2s_mmcs;
 
+use icicle_m31::quotient;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use twiddles::TwiddleTree;
@@ -24,7 +25,7 @@ use super::{
 use crate::core::air::accumulation::AccumulationOps;
 use crate::core::channel::Channel;
 use crate::core::circle::{self, CirclePoint, Coset};
-use crate::core::fields::qm31::SecureField;
+use crate::core::fields::qm31::{SecureField, QM31};
 use crate::core::fields::secure_column::SecureColumnByCoords;
 use crate::core::fields::{Field, FieldExpOps, FieldOps};
 use crate::core::fri::{FriOps, CIRCLE_TO_LINE_FOLD_STEP, FOLD_STEP};
@@ -612,7 +613,49 @@ impl QuotientOps for IcicleBackend {
         sample_batches: &[ColumnSampleBatch],
         log_blowup_factor: u32,
     ) -> SecureEvaluation<Self, BitReversedOrder> {
-        todo!()
+        let icicle_columns_raw = columns
+            .iter()
+            .flat_map(|x| x.iter().map(|&y| unsafe { transmute(y) }))
+            .collect_vec();
+        let icicle_columns = HostSlice::from_slice(&icicle_columns_raw);
+        let icicle_sample_batches = sample_batches
+            .into_iter()
+            .map(|sample| {
+                let (columns, values) = sample
+                    .columns_and_values
+                    .iter()
+                    .map(|(index, value)| {
+                        ((*index) as u32, unsafe {
+                            transmute::<QM31, QuarticExtensionField>(*value)
+                        })
+                    })
+                    .unzip();
+
+                quotient::ColumnSampleBatch {
+                    point: unsafe { transmute(sample.point) },
+                    columns,
+                    values,
+                }
+            })
+            .collect_vec();
+        let mut icicle_result_raw = vec![QuarticExtensionField::zero(); domain.size()];
+        let icicle_result = HostSlice::from_mut_slice(icicle_result_raw.as_mut_slice());
+        let cfg = quotient::QuotientConfig::default();
+
+        quotient::accumulate_quotients_wrapped(
+            domain.half_coset.initial_index.0 as u32,
+            domain.half_coset.step_size.0 as u32,
+            domain.log_size() as u32,
+            icicle_columns,
+            unsafe { transmute(random_coeff) },
+            &icicle_sample_batches,
+            icicle_result,
+            &cfg,
+        );
+        // TODO: make it on cuda side
+        let mut result = unsafe { SecureColumnByCoords::uninitialized(domain.size()) };
+        (0..domain.size()).for_each(|i| result.set(i, unsafe { transmute(icicle_result_raw[i]) }));
+        SecureEvaluation::new(domain, result)
     }
 }
 
@@ -768,12 +811,13 @@ mod tests {
     use crate::core::backend::cpu::CpuCirclePoly;
     use crate::core::backend::icicle::{IcicleBackend, IcicleCircleEvaluation, IcicleCirclePoly};
     use crate::core::backend::simd::SimdBackend;
-    use crate::core::circle::CirclePoint;
+    use crate::core::circle::{CirclePoint, SECURE_FIELD_CIRCLE_GEN};
     use crate::core::fields::m31::BaseField;
     use crate::core::fields::qm31::SecureField;
     use crate::core::fields::secure_column::SecureColumnByCoords;
     use crate::core::fields::ExtensionOf;
     use crate::core::fri::FriOps;
+    use crate::core::pcs::quotients::{ColumnSampleBatch, QuotientOps};
     use crate::core::poly::circle::{
         CanonicCoset, CircleEvaluation, CirclePoly, PolyOps, SecureEvaluation,
     };
@@ -781,7 +825,7 @@ mod tests {
     use crate::core::poly::twiddles::TwiddleTree;
     use crate::core::vcs::prover::MerkleProver;
     use crate::core::vcs::verifier::MerkleVerifier;
-    use crate::qm31;
+    use crate::{m31, qm31};
 
     impl<F: ExtensionOf<BaseField>, EvalOrder> IntoIterator
         for CircleEvaluation<IcicleBackend, F, EvalOrder>
@@ -1117,5 +1161,40 @@ mod tests {
             }
         }
         assert!(is_correct);
+    }
+    #[test]
+    fn test_icicle_quotients() {
+        const LOG_SIZE: u32 = 19;
+        const LOG_BLOWUP_FACTOR: u32 = 1;
+        let polynomial = CpuCirclePoly::new((0..1 << LOG_SIZE).map(|i| m31!(i)).collect());
+        let eval_domain = CanonicCoset::new(LOG_SIZE + 1).circle_domain();
+        let eval = polynomial.evaluate(eval_domain);
+
+        let point = SECURE_FIELD_CIRCLE_GEN;
+        let value = polynomial.eval_at_point(point);
+        let coeff = qm31!(1, 2, 3, 4);
+        let quot_eval_cpu = CpuBackend::accumulate_quotients(
+            eval_domain,
+            &[&eval],
+            coeff,
+            &[ColumnSampleBatch {
+                point,
+                columns_and_values: vec![(0, value)],
+            }],
+            LOG_BLOWUP_FACTOR,
+        ).to_vec();
+        let polynomial_icicle = IcicleCirclePoly::new((0..1 << LOG_SIZE).map(|i| m31!(i)).collect());
+        let eval_icicle = polynomial_icicle.evaluate(eval_domain);
+        let quot_eval_icicle = IcicleBackend::accumulate_quotients(
+            eval_domain,
+            &[&eval_icicle],
+            coeff,
+            &[ColumnSampleBatch {
+                point,
+                columns_and_values: vec![(0, value)],
+            }],
+            LOG_BLOWUP_FACTOR,
+        ).to_vec();
+        assert_eq!(quot_eval_cpu, quot_eval_icicle);
     }
 }
