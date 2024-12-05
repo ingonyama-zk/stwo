@@ -29,9 +29,9 @@ tracing.workspace = true
 rayon = { version = "1.10.0", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 
-icicle-cuda-runtime = { git = "https://github.com/ingonyama-zk/icicle.git", optional = true, rev="3c578e641b136f11d6230cb9300f4d89568b45ec"}
-icicle-core = { git = "https://github.com/ingonyama-zk/icicle.git", optional = true, rev="3c578e641b136f11d6230cb9300f4d89568b45ec"}
-icicle-m31 = { git = "https://github.com/ingonyama-zk/icicle.git", optional = true, rev="3c578e641b136f11d6230cb9300f4d89568b45ec"}
+icicle-cuda-runtime = { git = "https://github.com/ingonyama-zk/icicle.git", optional = true, rev="27be8aebde2d31ebf652c59449f94dc787bc6be8"}
+icicle-core = { git = "https://github.com/ingonyama-zk/icicle.git", optional = true, rev="27be8aebde2d31ebf652c59449f94dc787bc6be8"}
+icicle-m31 = { git = "https://github.com/ingonyama-zk/icicle.git", optional = true, rev="27be8aebde2d31ebf652c59449f94dc787bc6be8"}
 
 [dev-dependencies]
 aligned = "0.4.2"

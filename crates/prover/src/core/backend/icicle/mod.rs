@@ -8,7 +8,7 @@ use std::mem::{size_of_val, transmute};
 
 use icicle_core::vec_ops::{accumulate_scalars, VecOpsConfig};
 use icicle_m31::dcct::{evaluate, get_dcct_root_of_unity, initialize_dcct_domain, interpolate};
-use icicle_m31::fri::{self, fold_circle_into_line, FriConfig};
+use icicle_m31::fri::{self, fold_circle_into_line, fold_circle_into_line_new, fold_line_new, FriConfig};
 use icicle_m31::quotient;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
@@ -396,22 +396,22 @@ impl FriOps for IcicleBackend {
 
         let dom_vals_len = length / 2;
 
-        let mut domain_vals = Vec::new();
-        let line_domain_log_size = domain.log_size();
-        for i in 0..dom_vals_len {
-            // TODO: on-device batch
-            // TODO(andrew): Inefficient. Update when domain twiddles get stored in a buffer.
-            domain_vals.push(ScalarField::from_u32(
-                domain
-                    .at(bit_reverse_index(i << FOLD_STEP, line_domain_log_size))
-                    .inverse()
-                    .0,
-            ));
-        }
+        // let mut domain_vals = Vec::new();
+        // let line_domain_log_size = domain.log_size();
+        // for i in 0..dom_vals_len {
+        //     // TODO: on-device batch
+        //     // TODO(andrew): Inefficient. Update when domain twiddles get stored in a buffer.
+        //     domain_vals.push(ScalarField::from_u32(
+        //         domain
+        //             .at(bit_reverse_index(i << FOLD_STEP, line_domain_log_size))
+        //             .inverse()
+        //             .0,
+        //     ));
+        // }
 
-        let domain_icicle_host = HostSlice::from_slice(domain_vals.as_slice());
-        let mut d_domain_icicle = DeviceVec::<ScalarField>::cuda_malloc(dom_vals_len).unwrap();
-        d_domain_icicle.copy_from_host(domain_icicle_host).unwrap();
+        // let domain_icicle_host = HostSlice::from_slice(domain_vals.as_slice());
+        // let mut d_domain_icicle = DeviceVec::<ScalarField>::cuda_malloc(dom_vals_len).unwrap();
+        // d_domain_icicle.copy_from_host(domain_icicle_host).unwrap();
 
         let mut d_evals_icicle = DeviceVec::<QuarticExtensionField>::cuda_malloc(length).unwrap();
         SecureColumnByCoords::<IcicleBackend>::convert_to_icicle(
@@ -423,14 +423,23 @@ impl FriOps for IcicleBackend {
 
         let cfg = FriConfig::default();
         let icicle_alpha = unsafe { transmute(alpha) };
-        let _ = fri::fold_line(
+        let _ = fri::fold_line_new(
             &d_evals_icicle[..],
-            &d_domain_icicle[..],
+            domain.coset().initial_index.0 as u64,
+            domain.log_size(),
             &mut d_folded_eval[..],
             icicle_alpha,
             &cfg,
         )
         .unwrap();
+        // let _ = fri::fold_line(
+        //     &d_evals_icicle[..],
+        //     &d_domain_icicle[..],
+        //     &mut d_folded_eval[..],
+        //     icicle_alpha,
+        //     &cfg,
+        // )
+        // .unwrap();
 
         let mut folded_values = unsafe { SecureColumnByCoords::uninitialized(dom_vals_len) };
         SecureColumnByCoords::<IcicleBackend>::convert_from_icicle_q31(
@@ -455,28 +464,28 @@ impl FriOps for IcicleBackend {
         let dom_vals_len = length / 2;
         let _domain_log_size = domain.log_size();
 
-        let mut domain_rev = Vec::new();
-        for i in 0..dom_vals_len {
-            // TODO: on-device batch
-            // TODO(andrew): Inefficient. Update when domain twiddles get stored in a buffer.
-            let p = domain.at(bit_reverse_index(
-                i << CIRCLE_TO_LINE_FOLD_STEP,
-                domain.log_size(),
-            ));
-            let p = p.y.inverse();
-            domain_rev.push(p);
-        }
+        // let mut domain_rev = Vec::new();
+        // for i in 0..dom_vals_len {
+        //     // TODO: on-device batch
+        //     // TODO(andrew): Inefficient. Update when domain twiddles get stored in a buffer.
+        //     let p = domain.at(bit_reverse_index(
+        //         i << CIRCLE_TO_LINE_FOLD_STEP,
+        //         domain.log_size(),
+        //     ));
+        //     let p = p.y.inverse();
+        //     domain_rev.push(p);
+        // }
 
-        let domain_vals = (0..dom_vals_len)
-            .map(|i| {
-                let p = domain_rev[i];
-                ScalarField::from_u32(p.0)
-            })
-            .collect::<Vec<_>>();
+        // let domain_vals = (0..dom_vals_len)
+        //     .map(|i| {
+        //         let p = domain_rev[i];
+        //         ScalarField::from_u32(p.0)
+        //     })
+        //     .collect::<Vec<_>>();
 
-        let domain_icicle_host = HostSlice::from_slice(domain_vals.as_slice());
-        let mut d_domain_icicle = DeviceVec::<ScalarField>::cuda_malloc(dom_vals_len).unwrap();
-        d_domain_icicle.copy_from_host(domain_icicle_host).unwrap();
+        // let domain_icicle_host = HostSlice::from_slice(domain_vals.as_slice());
+        // let mut d_domain_icicle = DeviceVec::<ScalarField>::cuda_malloc(dom_vals_len).unwrap();
+        // d_domain_icicle.copy_from_host(domain_icicle_host).unwrap();
 
         let mut d_evals_icicle = DeviceVec::<QuarticExtensionField>::cuda_malloc(length).unwrap();
         SecureColumnByCoords::convert_to_icicle(&src.values, &mut d_evals_icicle);
@@ -490,14 +499,23 @@ impl FriOps for IcicleBackend {
         let cfg = FriConfig::default();
         let icicle_alpha = unsafe { transmute(alpha) };
 
-        let _ = fold_circle_into_line(
+        let _ = fold_circle_into_line_new(
             &d_evals_icicle[..],
-            &d_domain_icicle[..],
+            domain.half_coset.initial_index.0 as u64,
+            domain.half_coset.log_size,
             &mut d_folded_eval[..],
             icicle_alpha,
             &cfg,
         )
         .unwrap();
+        // let _ = fold_circle_into_line(
+        //     &d_evals_icicle[..],
+        //     &d_domain_icicle[..],
+        //     &mut d_folded_eval[..],
+        //     icicle_alpha,
+        //     &cfg,
+        // )
+        // .unwrap();
 
         d_folded_eval.copy_to_host(folded_eval).unwrap();
 
@@ -579,8 +597,6 @@ impl QuotientOps for IcicleBackend {
         let cfg = quotient::QuotientConfig::default();
 
         quotient::accumulate_quotients_wrapped(
-            domain.half_coset.initial_index.0 as u32,
-            domain.half_coset.step_size.0 as u32,
             domain.log_size() as u32,
             icicle_columns,
             unsafe { transmute(random_coeff) },
