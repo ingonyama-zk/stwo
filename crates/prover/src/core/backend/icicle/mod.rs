@@ -152,11 +152,6 @@ impl AccumulationOps for IcicleBackend {
             SecureColumnByCoords::convert_from_icicle(column, d_a_slice);
         }
     }
-
-    // fn confirm(column: &mut SecureColumnByCoords<Self>) {
-    //     column.convert_from_icicle(); // TODO: won't be necessary here on each call, only send
-    // back                                   // to stwo core
-    // }
 }
 
 // stwo/crates/prover/src/core/backend/cpu/blake2s.rs
@@ -193,22 +188,11 @@ impl MerkleOps<Blake2sMerkleHasher> for IcicleBackend {
         let mut layers = vec![];
         let mut offset = 0usize;
         for log in 0..=log_max {
-            // println!("Layer: {}", log);
             let inv_log = log_max - log;
             let number_of_rows = 1 << inv_log;
 
-            // let layer = unsafe {
-            //     Vec::from_raw_parts(
-            //         digests.as_mut_ptr().add(offset) as *mut <Blake2sMerkleHasher as MerkleHasher>::Hash,
-            //         number_of_rows,
-            //         number_of_rows
-            //     )
-            // };
             let mut layer = vec![];
             layer.extend_from_slice(&digests[offset..offset+number_of_rows]);
-            // for h in &layer {
-            //     println!("{}", h);
-            // }
             layers.push(layer);
 
             if log != log_max {
@@ -266,9 +250,7 @@ impl PolyOps for IcicleBackend {
 
         let values = eval.values;
         let rou = get_dcct_root_of_unity(eval.domain.size() as _);
-        // println!("ROU {:?}", rou);
         initialize_dcct_domain(eval.domain.log_size(), rou, &DeviceContext::default()).unwrap();
-        // println!("initialied DCCT succesfully");
 
         let mut evaluations = vec![ScalarField::zero(); values.len()];
         let values: Vec<ScalarField> = unsafe { transmute(values) };
@@ -311,9 +293,6 @@ impl PolyOps for IcicleBackend {
         }
 
         let values = poly.extend(domain.log_size()).coeffs;
-        // assert!(domain.half_coset.is_doubling_of(twiddles.root_coset));
-
-        // assert_eq!(1 << domain.log_size(), values.len() as u32);
 
         let rou = get_dcct_root_of_unity(domain.size() as _);
         initialize_dcct_domain(domain.log_size(), rou, &DeviceContext::default()).unwrap();
@@ -1010,17 +989,7 @@ mod tests {
             })
             .collect_vec();
 
-        // for col in &cols {
-        //     println!("Col: {}", col.len());
-        // }
-
         let merkle = MerkleProver::<CpuBackend, Blake2sMerkleHasher>::commit(cols.iter().collect_vec());
-        // for layer in &merkle.layers {
-        //     println!("LAYER");
-        //     for h in layer {
-        //         println!("CPU {:?}", h);
-        //     }
-        // }
 
         let icicle_merkle = MerkleProver::<IcicleBackend, Blake2sMerkleHasher>::commit(cols.iter().collect_vec());
 
@@ -1149,12 +1118,6 @@ mod tests {
                 &SimdBackend::precompute_twiddles(line_domain.coset()),
             );
 
-            // assert_eq!(
-            //     cpu_fold.values.to_vec(),
-            //     simd_fold.values.to_vec(),
-            //     "failed to fold log2: {}",
-            //     log_size
-            // );
             if icicle_fold.values.to_vec() != simd_fold.values.to_vec() {
                 println!("failed to fold log2: {}", log_size);
                 is_correct = false;
