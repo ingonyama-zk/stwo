@@ -10,10 +10,9 @@ use std::mem::{size_of_val, transmute};
 use icicle_core::tree::{merkle_tree_digests_len, TreeBuilderConfig};
 use icicle_core::vec_ops::{accumulate_scalars, VecOpsConfig};
 use icicle_core::Matrix;
+use icicle_hash::blake2s::build_blake2s_mmcs;
 use icicle_m31::dcct::{evaluate, get_dcct_root_of_unity, initialize_dcct_domain, interpolate};
 use icicle_m31::fri::{self, fold_circle_into_line, FriConfig};
-use icicle_hash::blake2s::build_blake2s_mmcs;
-
 use icicle_m31::quotient;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
@@ -159,7 +158,7 @@ impl MerkleOps<Blake2sMerkleHasher> for IcicleBackend {
     const COMMIT_IMPLEMENTED: bool = true;
 
     fn commit_columns(
-        columns: Vec<&Col<Self, BaseField>>
+        columns: Vec<&Col<Self, BaseField>>,
     ) -> Vec<Col<Self, <Blake2sMerkleHasher as MerkleHasher>::Hash>> {
         let mut config = TreeBuilderConfig::default();
         config.arity = 2;
@@ -167,12 +166,12 @@ impl MerkleOps<Blake2sMerkleHasher> for IcicleBackend {
         config.sort_inputs = false;
 
         let log_max = columns
-                .iter()
-                .sorted_by_key(|c| Reverse(c.len()))
-                .next()
-                .unwrap()
-                .len()
-                .ilog2();
+            .iter()
+            .sorted_by_key(|c| Reverse(c.len()))
+            .next()
+            .unwrap()
+            .len()
+            .ilog2();
         let mut matrices = vec![];
         for col in columns.into_iter().sorted_by_key(|c| Reverse(c.len())) {
             matrices.push(Matrix::from_slice(col, 4, col.len()));
@@ -183,7 +182,8 @@ impl MerkleOps<Blake2sMerkleHasher> for IcicleBackend {
 
         build_blake2s_mmcs(&matrices, digests_slice, &config).unwrap();
 
-        let mut digests: &[<Blake2sMerkleHasher as MerkleHasher>::Hash] = unsafe { std::mem::transmute(digests.as_mut_slice()) };
+        let mut digests: &[<Blake2sMerkleHasher as MerkleHasher>::Hash] =
+            unsafe { std::mem::transmute(digests.as_mut_slice()) };
         // Transmute digests into stwo format
         let mut layers = vec![];
         let mut offset = 0usize;
@@ -192,7 +192,7 @@ impl MerkleOps<Blake2sMerkleHasher> for IcicleBackend {
             let number_of_rows = 1 << inv_log;
 
             let mut layer = vec![];
-            layer.extend_from_slice(&digests[offset..offset+number_of_rows]);
+            layer.extend_from_slice(&digests[offset..offset + number_of_rows]);
             layers.push(layer);
 
             if log != log_max {
@@ -989,9 +989,11 @@ mod tests {
             })
             .collect_vec();
 
-        let merkle = MerkleProver::<CpuBackend, Blake2sMerkleHasher>::commit(cols.iter().collect_vec());
+        let merkle =
+            MerkleProver::<CpuBackend, Blake2sMerkleHasher>::commit(cols.iter().collect_vec());
 
-        let icicle_merkle = MerkleProver::<IcicleBackend, Blake2sMerkleHasher>::commit(cols.iter().collect_vec());
+        let icicle_merkle =
+            MerkleProver::<IcicleBackend, Blake2sMerkleHasher>::commit(cols.iter().collect_vec());
 
         for (layer, icicle_layer) in merkle.layers.iter().zip(icicle_merkle.layers.iter()) {
             for (h1, h2) in layer.iter().zip(icicle_layer.iter()) {
@@ -1145,8 +1147,10 @@ mod tests {
                 columns_and_values: vec![(0, value)],
             }],
             LOG_BLOWUP_FACTOR,
-        ).to_vec();
-        let polynomial_icicle = IcicleCirclePoly::new((0..1 << LOG_SIZE).map(|i| m31!(i)).collect());
+        )
+        .to_vec();
+        let polynomial_icicle =
+            IcicleCirclePoly::new((0..1 << LOG_SIZE).map(|i| m31!(i)).collect());
         let eval_icicle = polynomial_icicle.evaluate(eval_domain);
         let quot_eval_icicle = IcicleBackend::accumulate_quotients(
             eval_domain,
@@ -1157,7 +1161,8 @@ mod tests {
                 columns_and_values: vec![(0, value)],
             }],
             LOG_BLOWUP_FACTOR,
-        ).to_vec();
+        )
+        .to_vec();
         assert_eq!(quot_eval_cpu, quot_eval_icicle);
     }
 }

@@ -28,9 +28,7 @@ pub trait MerkleOps<H: MerkleHasher>:
 {
     const COMMIT_IMPLEMENTED: bool;
 
-    fn commit_columns(
-        columns: Vec<&Col<Self, BaseField>>
-    ) -> Vec<Col<Self, H::Hash>> {
+    fn commit_columns(columns: Vec<&Col<Self, BaseField>>) -> Vec<Col<Self, H::Hash>> {
         Vec::new()
     }
     /// Commits on an entire layer of the Merkle tree.

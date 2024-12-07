@@ -40,19 +40,21 @@ impl<B: MerkleOps<H>, H: MerkleHasher> MerkleProver<B, H> {
     pub fn commit(columns: Vec<&Col<B, BaseField>>) -> Self {
         if columns.is_empty() {
             return Self {
-                layers: vec![B::commit_on_layer(0, None, &[])], //TODO: does our Merkle support this?
+                // TODO: does our Merkle support this?
+                layers: vec![B::commit_on_layer(0, None, &[])],
             };
         }
 
         if B::COMMIT_IMPLEMENTED {
-            Self { layers: B::commit_columns(columns) }
+            Self {
+                layers: B::commit_columns(columns),
+            }
         } else {
             let columns = &mut columns
                 .into_iter()
                 .sorted_by_key(|c| Reverse(c.len()))
                 .peekable();
             let mut layers: Vec<Col<B, H::Hash>> = Vec::new();
-
 
             let max_log_size = columns.peek().unwrap().len().ilog2();
             for log_size in (0..=max_log_size).rev() {
