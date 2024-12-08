@@ -268,6 +268,7 @@ impl PolyOps for IcicleBackend {
     }
 
     fn eval_at_point(poly: &CirclePoly<Self>, point: CirclePoint<SecureField>) -> SecureField {
+        // todo!()
         unsafe { CpuBackend::eval_at_point(transmute(poly), point) }
     }
 
@@ -319,49 +320,49 @@ impl PolyOps for IcicleBackend {
         columns: impl IntoIterator<Item = CircleEvaluation<Self, BaseField, BitReversedOrder>>,
         twiddles: &TwiddleTree<Self>,
     ) -> Vec<CirclePoly<Self>> {
-        // columns
-        //     .into_iter()
-        //     .map(|eval| eval.interpolate_with_twiddles(twiddles))
-        //     .collect()
+        columns
+            .into_iter()
+            .map(|eval| eval.interpolate_with_twiddles(twiddles))
+            .collect()
 
-        let mut result = Vec::new();
-        let values: Vec<Vec<_>> = columns.into_iter().map(|eval| eval.values).collect();
-        let domain_size = values[0].len();
-        let domain_size_log2 = (domain_size as f64).log2() as u32;
-        let batch_size = values.len();
-        let ctx = DeviceContext::default();
-        let rou = get_dcct_root_of_unity(domain_size as _);
-        initialize_dcct_domain(domain_size_log2, rou, &ctx).unwrap();
+        // let mut result = Vec::new();
+        // let values: Vec<Vec<_>> = columns.into_iter().map(|eval| eval.values).collect();
+        // let domain_size = values[0].len();
+        // let domain_size_log2 = (domain_size as f64).log2() as u32;
+        // let batch_size = values.len();
+        // let ctx = DeviceContext::default();
+        // let rou = get_dcct_root_of_unity(domain_size as _);
+        // initialize_dcct_domain(domain_size_log2, rou, &ctx).unwrap();
         // assuming this is always evenly-sized batch m x n
-
-        let mut result_tr: DeviceVec<ScalarField> =
-            DeviceVec::cuda_malloc(domain_size * batch_size).unwrap();
-        let mut evaluations_batch = vec![ScalarField::zero(); domain_size * batch_size];
-
-        let mut res_host = HostSlice::from_mut_slice(&mut evaluations_batch[..]);
+        //
+        // let mut result_tr: DeviceVec<ScalarField> =
+        // DeviceVec::cuda_malloc(domain_size * batch_size).unwrap();
+        // let mut evaluations_batch = vec![ScalarField::zero(); domain_size * batch_size];
+        //
+        // let mut res_host = HostSlice::from_mut_slice(&mut evaluations_batch[..]);
         // result_tr.copy_to_host(res_host).unwrap();
-
+        //
         // non-contiguous memory on host
-        let evals: Vec<Vec<ScalarField>> = unsafe { transmute(values) };
-
+        // let evals: Vec<Vec<ScalarField>> = unsafe { transmute(values) };
+        //
         // contiguous memory on device
-        result_tr
-            .copy_from_host_slice_vec_async(&evals, &ctx.stream)
-            .unwrap();
-
-        ctx.stream.synchronize().unwrap();
-
-        let mut cfg = NTTConfig::default();
-        cfg.batch_size = batch_size as _;
-        cfg.ordering = Ordering::kNM;
-        evaluate(&result_tr[..], &cfg, res_host).unwrap();
-        for i in 0..batch_size {
-            result.push(CirclePoly::new(unsafe {
-                transmute(res_host.as_slice()[i * domain_size..(i + 1) * domain_size].to_vec())
-            }));
-        }
-
-        result
+        // result_tr
+        // .copy_from_host_slice_vec_async(&evals, &ctx.stream)
+        // .unwrap();
+        //
+        // ctx.stream.synchronize().unwrap();
+        //
+        // let mut cfg = NTTConfig::default();
+        // cfg.batch_size = batch_size as _;
+        // cfg.ordering = Ordering::kNM;
+        // evaluate(&result_tr[..], &cfg, res_host).unwrap();
+        // for i in 0..batch_size {
+        // result.push(CirclePoly::new(unsafe {
+        // transmute(res_host.as_slice()[i * domain_size..(i + 1) * domain_size].to_vec())
+        // }));
+        // }
+        //
+        // result
     }
 
     fn evaluate_polynomials(
@@ -369,51 +370,61 @@ impl PolyOps for IcicleBackend {
         log_blowup_factor: u32,
         twiddles: &TwiddleTree<Self>,
     ) -> Vec<CircleEvaluation<Self, BaseField, BitReversedOrder>> {
-        let mut result = Vec::new();
-        let domain =
-            CanonicCoset::new(polynomials[0].log_size() + log_blowup_factor).circle_domain();
-        let rou = get_dcct_root_of_unity(domain.size() as _);
-        let domain_size = 1 << domain.log_size();
-        let batch_size = polynomials.len();
-        let ctx = DeviceContext::default();
-        initialize_dcct_domain(domain.log_size(), rou, &ctx).unwrap();
-        // assuming this is always evenly-sized batch m x n
-
-        let mut result_tr: DeviceVec<ScalarField> =
-            DeviceVec::cuda_malloc(domain_size * batch_size).unwrap();
-        let mut evaluations_batch = vec![ScalarField::zero(); domain_size * batch_size];
-
-        let mut res_host = HostSlice::from_mut_slice(&mut evaluations_batch[..]);
-        // result_tr.copy_to_host(res_host).unwrap();
-
-        // non-contiguous memory on host
-        let vals_extended = polynomials
+        // TODO: it's variable size batch after all :(
+        polynomials
             .iter()
-            .map(|poly| poly.extend(domain.log_size()).coeffs)
-            .collect_vec();
-        let evals: Vec<Vec<ScalarField>> = unsafe { transmute(vals_extended) };
-
+            .map(|poly| {
+                poly.evaluate_with_twiddles(
+                    CanonicCoset::new(poly.log_size() + log_blowup_factor).circle_domain(),
+                    twiddles,
+                )
+            })
+            .collect_vec()
+        // let mut result = Vec::new();
+        // let domain =
+        // CanonicCoset::new(polynomials[0].log_size() + log_blowup_factor).circle_domain();
+        // let rou = get_dcct_root_of_unity(domain.size() as _);
+        // let domain_size = 1 << domain.log_size();
+        // let batch_size = polynomials.len();
+        // let ctx = DeviceContext::default();
+        // initialize_dcct_domain(domain.log_size(), rou, &ctx).unwrap();
+        // assuming this is always evenly-sized batch m x n
+        //
+        // let mut result_tr: DeviceVec<ScalarField> =
+        // DeviceVec::cuda_malloc(domain_size * batch_size).unwrap();
+        // let mut evaluations_batch = vec![ScalarField::zero(); domain_size * batch_size];
+        //
+        // let mut res_host = HostSlice::from_mut_slice(&mut evaluations_batch[..]);
+        // result_tr.copy_to_host(res_host).unwrap();
+        //
+        // non-contiguous memory on host
+        // let vals_extended = polynomials
+        // .iter()
+        // .map(|poly| poly.extend(domain.log_size()).coeffs)
+        // .collect_vec();
+        // let evals: Vec<Vec<ScalarField>> = unsafe { transmute(vals_extended) };
+        //
         // contiguous memory on device
-        result_tr
-            .copy_from_host_slice_vec_async(&evals, &ctx.stream)
-            .unwrap();
-
-        ctx.stream.synchronize().unwrap();
-
-        let mut cfg = NTTConfig::default();
-        cfg.batch_size = batch_size as _;
-        cfg.ordering = Ordering::kNM;
-        evaluate(&result_tr[..], &cfg, res_host).unwrap();
-        for i in 0..batch_size {
-            result.push(IcicleCircleEvaluation::<BaseField, BitReversedOrder>::new(
-                domain,
-                unsafe {
-                    transmute(res_host.as_slice()[i * domain_size..(i + 1) * domain_size].to_vec())
-                },
-            ));
-        }
-
-        result
+        // result_tr
+        // .copy_from_host_slice_vec_async(&evals, &ctx.stream)
+        // .unwrap();
+        //
+        // ctx.stream.synchronize().unwrap();
+        //
+        // let mut cfg = NTTConfig::default();
+        // cfg.batch_size = batch_size as _;
+        // cfg.ordering = Ordering::kNM;
+        // evaluate(&result_tr[..], &cfg, res_host).unwrap();
+        // for i in 0..batch_size {
+        // result.push(IcicleCircleEvaluation::<BaseField, BitReversedOrder>::new(
+        // domain,
+        // unsafe {
+        // transmute(res_host.as_slice()[i * domain_size..(i + 1) * domain_size].to_vec())
+        // },
+        // ));
+        // }
+        //
+        // result
     }
 
     fn precompute_twiddles(coset: Coset) -> TwiddleTree<Self> {
@@ -592,49 +603,59 @@ impl QuotientOps for IcicleBackend {
         sample_batches: &[ColumnSampleBatch],
         log_blowup_factor: u32,
     ) -> SecureEvaluation<Self, BitReversedOrder> {
-        let icicle_columns_raw = columns
-            .iter()
-            .flat_map(|x| x.iter().map(|&y| unsafe { transmute(y) }))
-            .collect_vec();
-        let icicle_columns = HostSlice::from_slice(&icicle_columns_raw);
-        let icicle_sample_batches = sample_batches
-            .into_iter()
-            .map(|sample| {
-                let (columns, values) = sample
-                    .columns_and_values
-                    .iter()
-                    .map(|(index, value)| {
-                        ((*index) as u32, unsafe {
-                            transmute::<QM31, QuarticExtensionField>(*value)
-                        })
-                    })
-                    .unzip();
-
-                quotient::ColumnSampleBatch {
-                    point: unsafe { transmute(sample.point) },
-                    columns,
-                    values,
-                }
-            })
-            .collect_vec();
-        let mut icicle_result_raw = vec![QuarticExtensionField::zero(); domain.size()];
-        let icicle_result = HostSlice::from_mut_slice(icicle_result_raw.as_mut_slice());
-        let cfg = quotient::QuotientConfig::default();
-
-        quotient::accumulate_quotients_wrapped(
-            domain.half_coset.initial_index.0 as u32,
-            domain.half_coset.step_size.0 as u32,
-            domain.log_size() as u32,
-            icicle_columns,
-            unsafe { transmute(random_coeff) },
-            &icicle_sample_batches,
-            icicle_result,
-            &cfg,
-        );
+        // todo!("our impl fails prove test but passes with cpu stub");
+        unsafe {
+            transmute(CpuBackend::accumulate_quotients(
+                domain,
+                unsafe { transmute(columns) },
+                random_coeff,
+                sample_batches,
+                log_blowup_factor,
+            ))
+        }
+        // let icicle_columns_raw = columns
+        // .iter()
+        // .flat_map(|x| x.iter().map(|&y| unsafe { transmute(y) }))
+        // .collect_vec();
+        // let icicle_columns = HostSlice::from_slice(&icicle_columns_raw);
+        // let icicle_sample_batches = sample_batches
+        // .into_iter()
+        // .map(|sample| {
+        // let (columns, values) = sample
+        // .columns_and_values
+        // .iter()
+        // .map(|(index, value)| {
+        // ((*index) as u32, unsafe {
+        // transmute::<QM31, QuarticExtensionField>(*value)
+        // })
+        // })
+        // .unzip();
+        //
+        // quotient::ColumnSampleBatch {
+        // point: unsafe { transmute(sample.point) },
+        // columns,
+        // values,
+        // }
+        // })
+        // .collect_vec();
+        // let mut icicle_result_raw = vec![QuarticExtensionField::zero(); domain.size()];
+        // let icicle_result = HostSlice::from_mut_slice(icicle_result_raw.as_mut_slice());
+        // let cfg = quotient::QuotientConfig::default();
+        //
+        // quotient::accumulate_quotients_wrapped(
+        // domain.half_coset.initial_index.0 as u32,
+        // domain.half_coset.step_size.0 as u32,
+        // domain.log_size() as u32,
+        // icicle_columns,
+        // unsafe { transmute(random_coeff) },
+        // &icicle_sample_batches,
+        // icicle_result,
+        // &cfg,
+        // );
         // TODO: make it on cuda side
-        let mut result = unsafe { SecureColumnByCoords::uninitialized(domain.size()) };
-        (0..domain.size()).for_each(|i| result.set(i, unsafe { transmute(icicle_result_raw[i]) }));
-        SecureEvaluation::new(domain, result)
+        // let mut result = unsafe { SecureColumnByCoords::uninitialized(domain.size()) };
+        // (0..domain.size()).for_each(|i| result.set(i, unsafe { transmute(icicle_result_raw[i])
+        // })); SecureEvaluation::new(domain, result)
     }
 }
 

@@ -85,6 +85,9 @@ impl<'a, B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentSchemeProver<'a,
         sampled_points: TreeVec<ColumnVec<Vec<CirclePoint<SecureField>>>>,
         channel: &mut MC::C,
     ) -> CommitmentSchemeProof<MC::H> {
+        #[cfg(feature = "icicle")]
+        nvtx::range_push!("fn prove_values(");
+
         // Evaluate polynomials on open points.
         let span = span!(Level::INFO, "Evaluate columns out of domain").entered();
         let samples = self
@@ -136,14 +139,18 @@ impl<'a, B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentSchemeProver<'a,
         let queried_values = decommitment_results.as_ref().map(|(v, _)| v.clone());
         let decommitments = decommitment_results.map(|(_, d)| d);
 
-        CommitmentSchemeProof {
+        let result = CommitmentSchemeProof {
             commitments: self.roots(),
             sampled_values,
             decommitments,
             queried_values,
             proof_of_work,
             fri_proof,
-        }
+        };
+
+        #[cfg(feature = "icicle")]
+        nvtx::range_pop!();
+        result
     }
 }
 
