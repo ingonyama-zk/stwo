@@ -160,6 +160,8 @@ impl<'a, B: FriOps + MerkleOps<MC::H>, MC: MerkleChannel> FriProver<'a, B, MC> {
         columns: &'a [SecureEvaluation<B, BitReversedOrder>],
         twiddles: &TwiddleTree<B>,
     ) -> Self {
+        #[cfg(feature = "icicle")]
+        nvtx::range_push!("fn FriPorover::commit(");
         assert!(!columns.is_empty(), "no columns");
         assert!(columns.is_sorted_by_key(|e| Reverse(e.len())), "not sorted");
         assert!(columns.iter().all(|e| e.domain.is_canonic()), "not canonic");
@@ -168,7 +170,8 @@ impl<'a, B: FriOps + MerkleOps<MC::H>, MC: MerkleChannel> FriProver<'a, B, MC> {
         let (inner_layers, last_layer_evaluation) =
             Self::commit_inner_layers(channel, config, columns, twiddles);
         let last_layer_poly = Self::commit_last_layer(channel, config, last_layer_evaluation);
-
+        #[cfg(feature = "icicle")]
+        nvtx::range_pop!();
         Self {
             config,
             first_layer,

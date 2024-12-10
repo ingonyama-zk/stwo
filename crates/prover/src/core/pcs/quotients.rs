@@ -78,8 +78,10 @@ pub fn compute_fri_quotients<B: QuotientOps>(
     random_coeff: SecureField,
     log_blowup_factor: u32,
 ) -> Vec<SecureEvaluation<B, BitReversedOrder>> {
+    #[cfg(feature = "icicle")]
+    nvtx::range_push!("fn compute_fri_quotients(");
     let _span = span!(Level::INFO, "Compute FRI quotients").entered();
-    zip(columns, samples)
+    let result = zip(columns, samples)
         .sorted_by_key(|(c, _)| Reverse(c.domain.log_size()))
         .group_by(|(c, _)| c.domain.log_size())
         .into_iter()
@@ -96,7 +98,11 @@ pub fn compute_fri_quotients<B: QuotientOps>(
                 log_blowup_factor,
             )
         })
-        .collect()
+        .collect();
+    
+    #[cfg(feature = "icicle")]
+    nvtx::range_pop!();
+    return result;
 }
 
 pub fn fri_answers(
