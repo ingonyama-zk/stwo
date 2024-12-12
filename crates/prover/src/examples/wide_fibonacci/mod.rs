@@ -259,7 +259,11 @@ mod tests {
 
             // Trace.
             let trace: Vec<CircleEvaluation<TheBackend, M31, BitReversedOrder>> =
-                unsafe { std::mem::transmute(generate_test_trace(log_n_instances)) };
+                generate_test_trace(log_n_instances)
+                    .iter()
+                    .map(|c| unsafe { std::mem::transmute(c.to_cpu()) })
+                    .collect_vec();
+
             let mut tree_builder = commitment_scheme.tree_builder();
             tree_builder.extend_evals(trace);
             tree_builder.commit(prover_channel);
