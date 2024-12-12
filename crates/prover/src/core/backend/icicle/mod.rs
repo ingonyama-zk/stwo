@@ -603,59 +603,60 @@ impl QuotientOps for IcicleBackend {
         sample_batches: &[ColumnSampleBatch],
         log_blowup_factor: u32,
     ) -> SecureEvaluation<Self, BitReversedOrder> {
-        // todo!("our impl fails prove test but passes with cpu stub");
-        unsafe {
-            transmute(CpuBackend::accumulate_quotients(
-                domain,
-                unsafe { transmute(columns) },
-                random_coeff,
-                sample_batches,
-                log_blowup_factor,
-            ))
-        }
-        // let icicle_columns_raw = columns
-        // .iter()
-        // .flat_map(|x| x.iter().map(|&y| unsafe { transmute(y) }))
-        // .collect_vec();
-        // let icicle_columns = HostSlice::from_slice(&icicle_columns_raw);
-        // let icicle_sample_batches = sample_batches
-        // .into_iter()
-        // .map(|sample| {
-        // let (columns, values) = sample
-        // .columns_and_values
-        // .iter()
-        // .map(|(index, value)| {
-        // ((*index) as u32, unsafe {
-        // transmute::<QM31, QuarticExtensionField>(*value)
-        // })
-        // })
-        // .unzip();
-        //
-        // quotient::ColumnSampleBatch {
-        // point: unsafe { transmute(sample.point) },
-        // columns,
-        // values,
+
+        // unsafe {
+        //     transmute(CpuBackend::accumulate_quotients(
+        //         domain,
+        //         unsafe { transmute(columns) },
+        //         random_coeff,
+        //         sample_batches,
+        //         log_blowup_factor,
+        //     ))
         // }
-        // })
-        // .collect_vec();
-        // let mut icicle_result_raw = vec![QuarticExtensionField::zero(); domain.size()];
-        // let icicle_result = HostSlice::from_mut_slice(icicle_result_raw.as_mut_slice());
-        // let cfg = quotient::QuotientConfig::default();
-        //
-        // quotient::accumulate_quotients_wrapped(
-        // domain.half_coset.initial_index.0 as u32,
-        // domain.half_coset.step_size.0 as u32,
-        // domain.log_size() as u32,
-        // icicle_columns,
-        // unsafe { transmute(random_coeff) },
-        // &icicle_sample_batches,
-        // icicle_result,
-        // &cfg,
-        // );
+
+        let icicle_columns_raw = columns
+            .iter()
+            .flat_map(|x| x.iter().map(|&y| unsafe { transmute(y) }))
+            .collect_vec();
+        let icicle_columns = HostSlice::from_slice(&icicle_columns_raw);
+        let icicle_sample_batches = sample_batches
+            .into_iter()
+            .map(|sample| {
+                let (columns, values) = sample
+                    .columns_and_values
+                    .iter()
+                    .map(|(index, value)| {
+                        ((*index) as u32, unsafe {
+                            transmute::<QM31, QuarticExtensionField>(*value)
+                        })
+                    })
+                    .unzip();
+
+                quotient::ColumnSampleBatch {
+                    point: unsafe { transmute(sample.point) },
+                    columns,
+                    values,
+                }
+            })
+            .collect_vec();
+        let mut icicle_result_raw = vec![QuarticExtensionField::zero(); domain.size()];
+        let icicle_result = HostSlice::from_mut_slice(icicle_result_raw.as_mut_slice());
+        let cfg = quotient::QuotientConfig::default();
+
+        quotient::accumulate_quotients_wrapped(
+            domain.half_coset.initial_index.0 as u32,
+            domain.half_coset.step_size.0 as u32,
+            domain.log_size() as u32,
+            icicle_columns,
+            unsafe { transmute(random_coeff) },
+            &icicle_sample_batches,
+            icicle_result,
+            &cfg,
+        );
         // TODO: make it on cuda side
-        // let mut result = unsafe { SecureColumnByCoords::uninitialized(domain.size()) };
-        // (0..domain.size()).for_each(|i| result.set(i, unsafe { transmute(icicle_result_raw[i])
-        // })); SecureEvaluation::new(domain, result)
+        let mut result = unsafe { SecureColumnByCoords::uninitialized(domain.size()) };
+        (0..domain.size()).for_each(|i| result.set(i, unsafe { transmute(icicle_result_raw[i]) }));
+        SecureEvaluation::new(domain, result)
     }
 }
 
