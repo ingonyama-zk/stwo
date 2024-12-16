@@ -12,7 +12,7 @@ use icicle_core::vec_ops::{accumulate_scalars, VecOpsConfig};
 use icicle_core::Matrix;
 use icicle_hash::blake2s::build_blake2s_mmcs;
 use icicle_m31::dcct::{evaluate, get_dcct_root_of_unity, initialize_dcct_domain, interpolate};
-use icicle_m31::fri::{self, fold_circle_into_line, FriConfig};
+use icicle_m31::fri::{self, fold_circle_into_line, fold_circle_into_line_new, FriConfig};
 use icicle_m31::quotient;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
@@ -509,30 +509,30 @@ impl FriOps for IcicleBackend {
         let length = src.values.len();
 
         let dom_vals_len = length / 2;
-        let _domain_log_size = domain.log_size();
+        let domain_log_size = domain.log_size();
 
-        let mut domain_rev = Vec::new();
-        for i in 0..dom_vals_len {
-            // TODO: on-device batch
-            // TODO(andrew): Inefficient. Update when domain twiddles get stored in a buffer.
-            let p = domain.at(bit_reverse_index(
-                i << CIRCLE_TO_LINE_FOLD_STEP,
-                domain.log_size(),
-            ));
-            let p = p.y.inverse();
-            domain_rev.push(p);
-        }
+        // let mut domain_rev = Vec::new();
+        // for i in 0..dom_vals_len {
+        //     // TODO: on-device batch
+        //     // TODO(andrew): Inefficient. Update when domain twiddles get stored in a buffer.
+        //     let p = domain.at(bit_reverse_index(
+        //         i << CIRCLE_TO_LINE_FOLD_STEP,
+        //         domain.log_size(),
+        //     ));
+        //     let p = p.y.inverse();
+        //     domain_rev.push(p);
+        // }
 
-        let domain_vals = (0..dom_vals_len)
-            .map(|i| {
-                let p = domain_rev[i];
-                ScalarField::from_u32(p.0)
-            })
-            .collect::<Vec<_>>();
+        // let domain_vals = (0..dom_vals_len)
+        //     .map(|i| {
+        //         let p = domain_rev[i];
+        //         ScalarField::from_u32(p.0)
+        //     })
+        //     .collect::<Vec<_>>();
 
-        let domain_icicle_host = HostSlice::from_slice(domain_vals.as_slice());
-        let mut d_domain_icicle = DeviceVec::<ScalarField>::cuda_malloc(dom_vals_len).unwrap();
-        d_domain_icicle.copy_from_host(domain_icicle_host).unwrap();
+        // let domain_icicle_host = HostSlice::from_slice(domain_vals.as_slice());
+        // let mut d_domain_icicle = DeviceVec::<ScalarField>::cuda_malloc(dom_vals_len).unwrap();
+        // d_domain_icicle.copy_from_host(domain_icicle_host).unwrap();
 
         let mut d_evals_icicle = DeviceVec::<QuarticExtensionField>::cuda_malloc(length).unwrap();
         SecureColumnByCoords::convert_to_icicle(&src.values, &mut d_evals_icicle);
@@ -546,12 +546,14 @@ impl FriOps for IcicleBackend {
         let cfg = FriConfig::default();
         let icicle_alpha = unsafe { transmute(alpha) };
 
-        let _ = fold_circle_into_line(
+        let _ = fold_circle_into_line_new(
             &d_evals_icicle[..],
-            &d_domain_icicle[..],
+            domain.half_coset.initial_index.0 as _,
+            domain.half_coset.log_size,
             &mut d_folded_eval[..],
             icicle_alpha,
             &cfg,
+
         )
         .unwrap();
 
@@ -606,59 +608,60 @@ impl QuotientOps for IcicleBackend {
         log_blowup_factor: u32,
     ) -> SecureEvaluation<Self, BitReversedOrder> {
 
-        // unsafe {
-        //     transmute(CpuBackend::accumulate_quotients(
-        //         domain,
-        //         unsafe { transmute(columns) },
-        //         random_coeff,
-        //         sample_batches,
-        //         log_blowup_factor,
-        //     ))
-        // }
+        // TODO: the fn accumulate_quotients( fix seems doesn't work for this branch https://github.com/ingonyama-zk/icicle/commit/eb82fbe20d116829eebf63d9b77e9a2eb2b0b0b0
+        unsafe {
+            transmute(CpuBackend::accumulate_quotients(
+                domain,
+                unsafe { transmute(columns) },
+                random_coeff,
+                sample_batches,
+                log_blowup_factor,
+            ))
+        }
 
-        let icicle_columns_raw = columns
-            .iter()
-            .flat_map(|x| x.iter().map(|&y| unsafe { transmute(y) }))
-            .collect_vec();
-        let icicle_columns = HostSlice::from_slice(&icicle_columns_raw);
-        let icicle_sample_batches = sample_batches
-            .into_iter()
-            .map(|sample| {
-                let (columns, values) = sample
-                    .columns_and_values
-                    .iter()
-                    .map(|(index, value)| {
-                        ((*index) as u32, unsafe {
-                            transmute::<QM31, QuarticExtensionField>(*value)
-                        })
-                    })
-                    .unzip();
+        // let icicle_columns_raw = columns
+        //     .iter()
+        //     .flat_map(|x| x.iter().map(|&y| unsafe { transmute(y) }))
+        //     .collect_vec();
+        // let icicle_columns = HostSlice::from_slice(&icicle_columns_raw);
+        // let icicle_sample_batches = sample_batches
+        //     .into_iter()
+        //     .map(|sample| {
+        //         let (columns, values) = sample
+        //             .columns_and_values
+        //             .iter()
+        //             .map(|(index, value)| {
+        //                 ((*index) as u32, unsafe {
+        //                     transmute::<QM31, QuarticExtensionField>(*value)
+        //                 })
+        //             })
+        //             .unzip();
 
-                quotient::ColumnSampleBatch {
-                    point: unsafe { transmute(sample.point) },
-                    columns,
-                    values,
-                }
-            })
-            .collect_vec();
-        let mut icicle_result_raw = vec![QuarticExtensionField::zero(); domain.size()];
-        let icicle_result = HostSlice::from_mut_slice(icicle_result_raw.as_mut_slice());
-        let cfg = quotient::QuotientConfig::default();
+        //         quotient::ColumnSampleBatch {
+        //             point: unsafe { transmute(sample.point) },
+        //             columns,
+        //             values,
+        //         }
+        //     })
+        //     .collect_vec();
+        // let mut icicle_result_raw = vec![QuarticExtensionField::zero(); domain.size()];
+        // let icicle_result = HostSlice::from_mut_slice(icicle_result_raw.as_mut_slice());
+        // let cfg = quotient::QuotientConfig::default();
 
-        quotient::accumulate_quotients_wrapped(
-            domain.half_coset.initial_index.0 as u32,
-            domain.half_coset.step_size.0 as u32,
-            domain.log_size() as u32,
-            icicle_columns,
-            unsafe { transmute(random_coeff) },
-            &icicle_sample_batches,
-            icicle_result,
-            &cfg,
-        );
-        // TODO: make it on cuda side
-        let mut result = unsafe { SecureColumnByCoords::uninitialized(domain.size()) };
-        (0..domain.size()).for_each(|i| result.set(i, unsafe { transmute(icicle_result_raw[i]) }));
-        SecureEvaluation::new(domain, result)
+        // quotient::accumulate_quotients_wrapped(
+        //     // domain.half_coset.initial_index.0 as u32,
+        //     // domain.half_coset.step_size.0 as u32,
+        //     domain.log_size() as u32,
+        //     icicle_columns,
+        //     unsafe { transmute(random_coeff) },
+        //     &icicle_sample_batches,
+        //     icicle_result,
+        //     &cfg,
+        // );
+        // // TODO: make it on cuda side
+        // let mut result = unsafe { SecureColumnByCoords::uninitialized(domain.size()) };
+        // (0..domain.size()).for_each(|i| result.set(i, unsafe { transmute(icicle_result_raw[i]) }));
+        // SecureEvaluation::new(domain, result)
     }
 }
 
