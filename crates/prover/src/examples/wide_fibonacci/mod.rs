@@ -229,16 +229,18 @@ mod tests {
     #[test]
     #[cfg(feature = "icicle")]
     fn test_wide_fib_prove_with_blake_icicle() {
-        // use crate::core::backend::icicle::IcicleBackend;
-        use crate::core::backend::CpuBackend;
+        use crate::core::backend::icicle::IcicleBackend;
+        // use crate::core::backend::CpuBackend;
         use crate::core::fields::m31::M31;
-        // type TheBackend = IcicleBackend;
+        use crate::examples::utils::get_env_var;
+        type TheBackend = IcicleBackend;
+        // type TheBackend = CpuBackend;
 
-        type TheBackend = CpuBackend;
+        let min_log = get_env_var("MIN_FIB_LOG", 2u32);
+        let max_log = get_env_var("MAX_FIB_LOG", 6u32);
 
-        // for log_n_instances in 2..=6 {
-        let log_n_instances = 6;
-        {
+        for log_n_instances in min_log..=max_log {
+            println!("proving for 2^{:?}...", log_n_instances);
             let config = PcsConfig::default();
             // Precompute twiddles.
             let twiddles = TheBackend::precompute_twiddles(
@@ -277,12 +279,18 @@ mod tests {
                 (SecureField::zero(), None),
             );
 
+            let start = std::time::Instant::now();
             let proof = prove::<TheBackend, Blake2sMerkleChannel>(
                 &[&component],
                 prover_channel,
                 commitment_scheme,
             )
             .unwrap();
+            println!(
+                "proving for 2^{:?} took {:?} ms",
+                log_n_instances,
+                start.elapsed().as_millis()
+            );
 
             // Verify.
             let verifier_channel = &mut Blake2sChannel::default();

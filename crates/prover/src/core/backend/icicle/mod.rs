@@ -45,6 +45,8 @@ use crate::core::ColumnVec;
 #[derive(Copy, Clone, Debug, Deserialize, Serialize, Default)]
 pub struct IcicleBackend;
 
+pub mod utils;
+
 impl Backend for IcicleBackend {}
 
 // stwo/crates/prover/src/core/backend/cpu/lookups/gkr.rs

@@ -493,6 +493,7 @@ mod tests {
     use crate::core::fields::FieldExpOps;
     use crate::core::pcs::{PcsConfig, TreeVec};
     use crate::core::poly::circle::CanonicCoset;
+    use crate::examples::utils::get_env_var;
 
     #[test]
     fn test_state_machine_constraints() {
@@ -559,14 +560,7 @@ mod tests {
 
     #[test]
     fn test_state_machine_prove() {
-        fn get_env_log2(key: &str, default: u32) -> u32 {
-            std::env::var(key)
-                .unwrap_or_else(|_| default.to_string())
-                .parse()
-                .unwrap_or(default)
-        }
-
-        let log_n_rows = get_env_log2("TSMP_LOG2", 8);
+        let log_n_rows = get_env_var("TSMP_LOG2", 8u32);
 
         let config = PcsConfig::default();
         let initial_state = [M31::zero(); STATE_SIZE];
