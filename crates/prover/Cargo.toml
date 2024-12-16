@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [features]
-default = ["icicle"]
+default = ["icicle", "parallel"]
 parallel = ["rayon"]
 slow-tests = []
 icicle = ["icicle-cuda-runtime", "icicle-core", "icicle-m31", "icicle-hash", "nvtx"]
@@ -29,10 +29,15 @@ tracing.workspace = true
 rayon = { version = "1.10.0", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 
-icicle-cuda-runtime = { git = "https://github.com/ingonyama-zk/icicle.git", optional = true, rev="c33902295916c5b9bebdbc4ec32e0f531502b141"}
-icicle-core = { git = "https://github.com/ingonyama-zk/icicle.git", optional = true, rev="c33902295916c5b9bebdbc4ec32e0f531502b141"}
-icicle-m31 = { git = "https://github.com/ingonyama-zk/icicle.git", optional = true, rev="c33902295916c5b9bebdbc4ec32e0f531502b141"}
-icicle-hash = { git = "https://github.com/ingonyama-zk/icicle.git", optional = true, rev="c33902295916c5b9bebdbc4ec32e0f531502b141"}
+# icicle-cuda-runtime = { git = "https://github.com/ingonyama-zk/icicle.git", optional = true, rev="c33902295916c5b9bebdbc4ec32e0f531502b141"}
+# icicle-core = { git = "https://github.com/ingonyama-zk/icicle.git", optional = true, rev="c33902295916c5b9bebdbc4ec32e0f531502b141"}
+# icicle-m31 = { git = "https://github.com/ingonyama-zk/icicle.git", optional = true, rev="c33902295916c5b9bebdbc4ec32e0f531502b141"}
+# icicle-hash = { git = "https://github.com/ingonyama-zk/icicle.git", optional = true, rev="c33902295916c5b9bebdbc4ec32e0f531502b141"}
+
+icicle-cuda-runtime = { path = "/home/vhnat/repo/icicle/wrappers/rust/icicle-cuda-runtime", optional = true}
+icicle-core = { path = "/home/vhnat/repo/icicle/wrappers/rust/icicle-core", optional = true}
+icicle-m31 = { path = "/home/vhnat/repo/icicle/wrappers/rust/icicle-fields/icicle-m31", optional = true}
+icicle-hash = { path = "/home/vhnat/repo/icicle/wrappers/rust/icicle-hash", optional = true}
 nvtx = { version = "*", optional = true } 
 
 
