@@ -271,7 +271,20 @@ impl PolyOps for IcicleBackend {
 
     fn eval_at_point(poly: &CirclePoly<Self>, point: CirclePoint<SecureField>) -> SecureField {
         // todo!()
-        unsafe { CpuBackend::eval_at_point(transmute(poly), point) }
+        // unsafe { CpuBackend::eval_at_point(transmute(poly), point) }
+        if poly.log_size() == 0 {
+            return poly.coeffs[0].into();
+        }
+        // TODO: to gpu after correctness fix
+        let mut mappings = vec![point.y];
+        let mut x = point.x;
+        for _ in 1..poly.log_size() {
+            mappings.push(x);
+            x = CirclePoint::double_x(x);
+        }
+        mappings.reverse();
+
+        crate::core::backend::icicle::utils::fold(&poly.coeffs, &mappings)
     }
 
     fn extend(poly: &CirclePoly<Self>, log_size: u32) -> CirclePoly<Self> {

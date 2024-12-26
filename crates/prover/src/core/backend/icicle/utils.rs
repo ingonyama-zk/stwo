@@ -1,4 +1,28 @@
+use std::mem::transmute;
+
+use icicle_core::ntt::FieldImpl;
+use icicle_core::vec_ops::{fold_scalars, VecOps, VecOpsConfig};
+use icicle_cuda_runtime::memory::HostSlice;
+use icicle_m31::field::{ComplexExtensionField, QuarticExtensionField, ScalarField};
+
+use crate::core::fields::m31::M31;
+use crate::core::fields::qm31::QM31;
 use crate::core::fields::{ExtensionOf, Field};
+
+macro_rules! select_result_type {
+    (1) => {
+        ScalarField
+    };
+    (2) => {
+        ComplexExtensionField
+    };
+    (4) => {
+        QuarticExtensionField
+    };
+    ($other:expr) => {
+        compile_error!("Unsupported limbs count")
+    };
+}
 
 /// Folds values recursively in `O(n)` by a hierarchical application of folding factors.
 ///
@@ -19,37 +43,35 @@ use crate::core::fields::{ExtensionOf, Field};
 /// Panics if the number of values is not a power of two or if an incorrect number of of folding
 /// factors is provided.
 // TODO(Andrew): Can be made to run >10x faster by unrolling lower layers of recursion
-pub fn fold<F: Field, E: ExtensionOf<F>>(values: &[F], folding_factors: &[E]) -> E {
-    let n = values.len();
-    assert_eq!(n, 1 << folding_factors.len());
-    if n == 1 {
-        let res: E = values[0].into();
-        return res;
-    }
-    let (lhs_values, rhs_values) = values.split_at(n / 2);
-    let (folding_factor, folding_factors) = folding_factors.split_first().unwrap();
-    let lhs_val = fold(lhs_values, folding_factors);
-    let rhs_val = fold(rhs_values, folding_factors);
-    // println!(
-    //     "n={:?} lhs_val{:?} + rhs_val{:?} x folding_factor: {:?}",
-    //     n, lhs_val, rhs_val, *folding_factor
-    // );
-    let res = lhs_val + rhs_val * *folding_factor;
-    // println!("res = {:?}; ", res);
-    res
-}
+pub fn fold<'a, F: Field, E: ExtensionOf<F> + Sized>(
+    values: &'a [F],
+    folding_factors: &'a [E],
+) -> E {
+    assert!(values.len().is_power_of_two());
 
-pub fn fold_gpu<F: Field, E: ExtensionOf<F>>(values: &[F], folding_factors: &[E]) -> E {
-    let n = values.len();
-    assert_eq!(n, 1 << folding_factors.len());
-    if n == 1 {
-        return values[0].into();
+    let a = HostSlice::from_slice(unsafe { transmute(values) });
+    let b = HostSlice::from_slice(unsafe { transmute(folding_factors) });
+    let mut result = vec![QuarticExtensionField::zero()];
+    let res = HostSlice::from_mut_slice(&mut result);
+
+    let cfg = VecOpsConfig::default();
+
+    // TODO: generic macro for selecting appropriate result type
+    // let limbs_count: usize = std::mem::size_of::<E>() / 4;
+    // type EE = select_result_type!(limbs_count);
+    // let limbs_count: usize = std::mem::size_of::<F>() / 4;
+    // type FF = select_result_type!(limbs_count);
+
+    fold_scalars::<QuarticExtensionField, ScalarField>(a, b, res, &cfg).unwrap();
+
+    unsafe {
+        let vec: Vec<E> = transmute(result);
+        if let Some(first) = vec.first() {
+            *first
+        } else {
+            panic!("Fold result empty.");
+        }
     }
-    let (lhs_values, rhs_values) = values.split_at(n / 2);
-    let (folding_factor, folding_factors) = folding_factors.split_first().unwrap();
-    let lhs_val = fold(lhs_values, folding_factors);
-    let rhs_val = fold(rhs_values, folding_factors);
-    lhs_val + rhs_val * *folding_factor
 }
 
 #[cfg(test)]
