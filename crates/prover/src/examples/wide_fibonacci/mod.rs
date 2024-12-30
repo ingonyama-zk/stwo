@@ -237,7 +237,7 @@ mod tests {
         // type TheBackend = CpuBackend;
 
         let min_log = get_env_var("MIN_FIB_LOG", 2u32);
-        let max_log = get_env_var("MAX_FIB_LOG", 18u32);
+        let max_log = get_env_var("MAX_FIB_LOG", 23u32);
 
         for log_n_instances in min_log..=max_log {
             for _ in 0..1 {
