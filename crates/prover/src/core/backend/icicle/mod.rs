@@ -9,11 +9,12 @@ use std::mem::{size_of_val, transmute};
 
 use icicle_core::tree::{merkle_tree_digests_len, TreeBuilderConfig};
 use icicle_core::vec_ops::{accumulate_scalars, VecOpsConfig};
-use icicle_core::Matrix;
+use icicle_core::{field::Field as IcicleField, Matrix};
 use icicle_hash::blake2s::build_blake2s_mmcs;
 use icicle_m31::dcct::{evaluate, get_dcct_root_of_unity, initialize_dcct_domain, interpolate};
 use icicle_m31::fri::{self, fold_circle_into_line, FriConfig};
 use icicle_m31::quotient;
+use icicle_m31::field::ScalarCfg;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use twiddles::TwiddleTree;
@@ -629,10 +630,13 @@ impl QuotientOps for IcicleBackend {
         //     ))
         // }
 
-        let icicle_columns_raw = columns
-            .iter()
-            .flat_map(|x| x.iter().map(|&y| unsafe { transmute(y) }))
-            .collect_vec();
+        let mut icicle_columns_raw: Vec<IcicleField<1, ScalarCfg>> = vec![];
+        for column in columns {
+            let mut transmuted_values = vec![ScalarField::zero(); column.values.len()];
+            transmuted_values = unsafe { transmute(column.values.clone()) };
+            icicle_columns_raw.append(&mut transmuted_values);
+        }
+
         let icicle_columns = HostSlice::from_slice(&icicle_columns_raw);
         let icicle_sample_batches = sample_batches
             .into_iter()
