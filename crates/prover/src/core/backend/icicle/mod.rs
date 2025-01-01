@@ -100,7 +100,7 @@ impl AccumulationOps for IcicleBackend {
     fn accumulate(column: &mut SecureColumnByCoords<Self>, other: &SecureColumnByCoords<Self>) {
         use icicle_core::vec_ops::{accumulate_scalars, VecOpsConfig};
         use icicle_cuda_runtime::memory::{DeviceVec, HostOrDeviceSlice};
-
+        nvtx::range_push!("fn accumulate(");
         let cfg = VecOpsConfig::default();
 
         unsafe {
@@ -152,6 +152,7 @@ impl AccumulationOps for IcicleBackend {
             let d_a_slice = DeviceSlice::from_mut_slice(d_slice);
             SecureColumnByCoords::convert_from_icicle(column, d_a_slice);
         }
+        nvtx::range_pop!();
     }
 }
 
@@ -240,6 +241,7 @@ impl PolyOps for IcicleBackend {
         itwiddles: &TwiddleTree<Self>,
     ) -> CirclePoly<Self> {
         // todo!()
+        nvtx::range_push!("fn interpolate(");
         if eval.domain.log_size() <= 3 || eval.domain.log_size() == 7 {
             // TODO: as property .is_dcct_available etc...
             return unsafe {
@@ -265,13 +267,14 @@ impl PolyOps for IcicleBackend {
         )
         .unwrap();
         let values: Vec<BaseField> = unsafe { transmute(evaluations) };
-
+        nvtx::range_pop!();
         CirclePoly::new(values)
     }
 
     fn eval_at_point(poly: &CirclePoly<Self>, point: CirclePoint<SecureField>) -> SecureField {
         // todo!()
         // unsafe { CpuBackend::eval_at_point(transmute(poly), point) }
+        nvtx::range_push!("fn eval_at_point(");
         if poly.log_size() == 0 {
             return poly.coeffs[0].into();
         }
@@ -284,7 +287,9 @@ impl PolyOps for IcicleBackend {
         }
         mappings.reverse();
 
-        crate::core::backend::icicle::utils::fold(&poly.coeffs, &mappings)
+        let ret = crate::core::backend::icicle::utils::fold(&poly.coeffs, &mappings);
+        nvtx::range_pop!();
+        ret
     }
 
     fn extend(poly: &CirclePoly<Self>, log_size: u32) -> CirclePoly<Self> {
@@ -298,6 +303,7 @@ impl PolyOps for IcicleBackend {
         twiddles: &TwiddleTree<Self>,
     ) -> CircleEvaluation<Self, BaseField, BitReversedOrder> {
         // todo!()
+        nvtx::range_push!("fn evaluate(");
         if domain.log_size() <= 3 || domain.log_size() == 7 {
             return unsafe {
                 transmute(CpuBackend::evaluate(
@@ -323,6 +329,7 @@ impl PolyOps for IcicleBackend {
             HostSlice::from_mut_slice(&mut evaluations),
         )
         .unwrap();
+        nvtx::range_pop!();
         unsafe {
             transmute(IcicleCircleEvaluation::<BaseField, BitReversedOrder>::new(
                 domain,
@@ -335,11 +342,13 @@ impl PolyOps for IcicleBackend {
         columns: impl IntoIterator<Item = CircleEvaluation<Self, BaseField, BitReversedOrder>>,
         twiddles: &TwiddleTree<Self>,
     ) -> Vec<CirclePoly<Self>> {
-        columns
+        nvtx::range_push!("fn interpolate_columns(");
+        let ret = columns
             .into_iter()
             .map(|eval| eval.interpolate_with_twiddles(twiddles))
-            .collect()
-
+            .collect();
+        nvtx::range_pop!();
+        ret
         // let mut result = Vec::new();
         // let values: Vec<Vec<_>> = columns.into_iter().map(|eval| eval.values).collect();
         // let domain_size = values[0].len();
@@ -386,7 +395,8 @@ impl PolyOps for IcicleBackend {
         twiddles: &TwiddleTree<Self>,
     ) -> Vec<CircleEvaluation<Self, BaseField, BitReversedOrder>> {
         // TODO: it's variable size batch after all :(
-        polynomials
+        nvtx::range_push!("fn evaluate_polynomials(");
+        let ret = polynomials
             .iter()
             .map(|poly| {
                 poly.evaluate_with_twiddles(
@@ -394,7 +404,9 @@ impl PolyOps for IcicleBackend {
                     twiddles,
                 )
             })
-            .collect_vec()
+            .collect_vec();
+        nvtx::range_pop!();
+        ret
         // let mut result = Vec::new();
         // let domain =
         // CanonicCoset::new(polynomials[0].log_size() + log_blowup_factor).circle_domain();
@@ -456,17 +468,20 @@ impl FriOps for IcicleBackend {
         twiddles: &TwiddleTree<Self>,
     ) -> LineEvaluation<Self> {
         use crate::core::backend::icicle::IcicleBackend;
+        nvtx::range_push!("fn fold_line(");
         let length = eval.values.len(); // TODO: same as n
 
         let n = eval.len();
         assert!(n >= 2, "Evaluation too small");
-
+        nvtx::range_push!("let domain");
         let domain = eval.domain();
+        nvtx::range_pop!();
 
         let dom_vals_len = length / 2;
 
         let mut domain_vals = Vec::new();
         let line_domain_log_size = domain.log_size();
+        nvtx::range_push!("for i in 0..dom_vals_len");
         for i in 0..dom_vals_len {
             // TODO: on-device batch
             // TODO(andrew): Inefficient. Update when domain twiddles get stored in a buffer.
@@ -477,21 +492,25 @@ impl FriOps for IcicleBackend {
                     .0,
             ));
         }
+        nvtx::range_pop!();
 
         let domain_icicle_host = HostSlice::from_slice(domain_vals.as_slice());
         let mut d_domain_icicle = DeviceVec::<ScalarField>::cuda_malloc(dom_vals_len).unwrap();
         d_domain_icicle.copy_from_host(domain_icicle_host).unwrap();
 
         let mut d_evals_icicle = DeviceVec::<QuarticExtensionField>::cuda_malloc(length).unwrap();
+        nvtx::range_push!("convert_to_icicle");
         SecureColumnByCoords::<IcicleBackend>::convert_to_icicle(
             unsafe { transmute(&eval.values) },
             &mut d_evals_icicle,
         );
+        nvtx::range_pop!();
         let mut d_folded_eval =
             DeviceVec::<QuarticExtensionField>::cuda_malloc(dom_vals_len).unwrap();
 
         let cfg = FriConfig::default();
         let icicle_alpha = unsafe { transmute(alpha) };
+        nvtx::range_push!("fri::fold_line(");
         let _ = fri::fold_line(
             &d_evals_icicle[..],
             &d_domain_icicle[..],
@@ -500,14 +519,20 @@ impl FriOps for IcicleBackend {
             &cfg,
         )
         .unwrap();
-
+        nvtx::range_pop!();
+        nvtx::range_push!("let mut folded_values");
         let mut folded_values = unsafe { SecureColumnByCoords::uninitialized(dom_vals_len) };
+        nvtx::range_pop!();
+        nvtx::range_push!("convert_from_icicle_q31");
         SecureColumnByCoords::<IcicleBackend>::convert_from_icicle_q31(
             &mut folded_values,
             &mut d_folded_eval[..],
         );
-
-        LineEvaluation::new(domain.double(), folded_values)
+        nvtx::range_pop!();
+        let ret = 
+        LineEvaluation::new(domain.double(), folded_values);
+        nvtx::range_pop!();
+        ret
     }
 
     fn fold_circle_into_line(
@@ -516,6 +541,7 @@ impl FriOps for IcicleBackend {
         alpha: SecureField,
         twiddles: &TwiddleTree<Self>,
     ) {
+        nvtx::range_push!("ICICLE fold_circle_into_line(");
         assert_eq!(src.len() >> CIRCLE_TO_LINE_FOLD_STEP, dst.len());
 
         let domain = src.domain;
@@ -525,6 +551,7 @@ impl FriOps for IcicleBackend {
         let _domain_log_size = domain.log_size();
 
         let mut domain_rev = Vec::new();
+        nvtx::range_push!("for i in 0..dom_vals_len {");
         for i in 0..dom_vals_len {
             // TODO: on-device batch
             // TODO(andrew): Inefficient. Update when domain twiddles get stored in a buffer.
@@ -535,30 +562,35 @@ impl FriOps for IcicleBackend {
             let p = p.y.inverse();
             domain_rev.push(p);
         }
-
+        nvtx::range_pop!();
+        nvtx::range_push!(" let domain_vals");
         let domain_vals = (0..dom_vals_len)
             .map(|i| {
                 let p = domain_rev[i];
                 ScalarField::from_u32(p.0)
             })
             .collect::<Vec<_>>();
-
+        nvtx::range_pop!();
         let domain_icicle_host = HostSlice::from_slice(domain_vals.as_slice());
         let mut d_domain_icicle = DeviceVec::<ScalarField>::cuda_malloc(dom_vals_len).unwrap();
         d_domain_icicle.copy_from_host(domain_icicle_host).unwrap();
 
         let mut d_evals_icicle = DeviceVec::<QuarticExtensionField>::cuda_malloc(length).unwrap();
+        nvtx::range_push!("convert_to_icicle");
         SecureColumnByCoords::convert_to_icicle(&src.values, &mut d_evals_icicle);
         let mut d_folded_eval =
             DeviceVec::<QuarticExtensionField>::cuda_malloc(dom_vals_len).unwrap();
+        nvtx::range_pop!();
+        nvtx::range_push!("convert_to_icicle 2");
         SecureColumnByCoords::convert_to_icicle(&dst.values, &mut d_folded_eval);
+        nvtx::range_pop!();
 
         let mut folded_eval_raw = vec![QuarticExtensionField::zero(); dom_vals_len];
         let folded_eval = HostSlice::from_mut_slice(folded_eval_raw.as_mut_slice());
 
         let cfg = FriConfig::default();
         let icicle_alpha = unsafe { transmute(alpha) };
-
+        nvtx::range_push!("let _ = fold_circle_into_line(");
         let _ = fold_circle_into_line(
             &d_evals_icicle[..],
             &d_domain_icicle[..],
@@ -567,10 +599,13 @@ impl FriOps for IcicleBackend {
             &cfg,
         )
         .unwrap();
+        nvtx::range_pop!();
 
         d_folded_eval.copy_to_host(folded_eval).unwrap();
 
-        SecureColumnByCoords::convert_from_icicle_q31(&mut dst.values, &mut d_folded_eval[..]);
+        let ret = SecureColumnByCoords::convert_from_icicle_q31(&mut dst.values, &mut d_folded_eval[..]);
+        nvtx::range_pop!();
+        ret
     }
 
     fn decompose(
@@ -628,12 +663,27 @@ impl QuotientOps for IcicleBackend {
         //         log_blowup_factor,
         //     ))
         // }
+        nvtx::range_push!("fn accumulate_quotients(");
 
+        let start: std::time::Instant = std::time::Instant::now();
+        nvtx::range_push!("let mut icicle_columns_raw:");
         let icicle_columns_raw = columns
             .iter()
             .flat_map(|x| x.iter().map(|&y| unsafe { transmute(y) }))
             .collect_vec();
+        nvtx::range_pop!();
+        println!(
+            "icicle_columns_raw took {:?} ms",
+            start.elapsed().as_millis()
+        );
+        let start_icicle_columns = std::time::Instant::now();
         let icicle_columns = HostSlice::from_slice(&icicle_columns_raw);
+        println!(
+            "icicle_columns took {:?} ms",
+            start_icicle_columns.elapsed().as_millis()
+        );
+        let start_icicle_sample_batches = std::time::Instant::now();
+        nvtx::range_push!("let icicle_sample_batches");
         let icicle_sample_batches = sample_batches
             .into_iter()
             .map(|sample| {
@@ -647,17 +697,33 @@ impl QuotientOps for IcicleBackend {
                     })
                     .unzip();
 
+                println!(
+                    "icicle_sample_batches_part took {:?} ms",
+                    start_icicle_sample_batches.elapsed().as_millis()
+                );
+                // let start_icicle_quotient = std::time::Instant::now();
                 quotient::ColumnSampleBatch {
                     point: unsafe { transmute(sample.point) },
                     columns,
                     values,
                 }
-            })
-            .collect_vec();
+                // println!(
+                //     "quotient::ColumnSampleBatch took {:?} ms",
+                //     start_icicle_quotient.elapsed().as_millis()
+                // );
+            }
+        ).collect_vec();
+        nvtx::range_pop!();
+        println!(
+            "icicle_sample_batches took {:?} ms",
+            start_icicle_sample_batches.elapsed().as_millis()
+        );
         let mut icicle_result_raw = vec![QuarticExtensionField::zero(); domain.size()];
         let icicle_result = HostSlice::from_mut_slice(icicle_result_raw.as_mut_slice());
         let cfg = quotient::QuotientConfig::default();
-
+        
+        let start2: std::time::Instant = std::time::Instant::now();
+        nvtx::range_push!("accumulate_quotients_wrapped(");
         quotient::accumulate_quotients_wrapped(
             domain.half_coset.initial_index.0 as u32,
             domain.half_coset.step_size.0 as u32,
@@ -668,10 +734,33 @@ impl QuotientOps for IcicleBackend {
             icicle_result,
             &cfg,
         );
+        nvtx::range_pop!();
+        println!(
+            "CUDA: accumulate_quotients_wrapped took {:?} ms",
+            start2.elapsed().as_millis()
+        );
+        let start3 = std::time::Instant::now();
+
         // TODO: make it on cuda side
         let mut result = unsafe { SecureColumnByCoords::uninitialized(domain.size()) };
         (0..domain.size()).for_each(|i| result.set(i, unsafe { transmute(icicle_result_raw[i]) }));
-        SecureEvaluation::new(domain, result)
+        println!(
+            "result took {:?} ms",
+            start3.elapsed().as_millis()
+        );
+        let start4 = std::time::Instant::now();
+
+        let ret = SecureEvaluation::new(domain, result);
+        println!(
+            "ret took {:?} ms",
+            start4.elapsed().as_millis()
+        );
+        println!(
+            "accumulate_quotients took {:?} ms",
+            start.elapsed().as_millis()
+        );
+        nvtx::range_pop!();
+        ret
     }
 }
 
@@ -685,7 +774,6 @@ impl MerkleOps<Poseidon252MerkleHasher> for IcicleBackend {
         columns: &[&Col<Self, BaseField>],
     ) -> Col<Self, <Poseidon252MerkleHasher as MerkleHasher>::Hash> {
         // todo!()
-
         <CpuBackend as MerkleOps<Poseidon252MerkleHasher>>::commit_on_layer(
             log_size, prev_layer, columns,
         )
@@ -770,6 +858,7 @@ impl SecureColumnByCoords<IcicleBackend> {
     }
 
     pub fn convert_from_icicle(input: &mut Self, d_input: &mut DeviceSlice<ScalarField>) {
+        nvtx::range_push!("pub fn convert_from_icicle(");
         let zero = ScalarField::zero();
 
         let n = input.columns[0].len();
@@ -803,6 +892,7 @@ impl SecureColumnByCoords<IcicleBackend> {
             input.columns[i].truncate(0);
             input.columns[i].extend_from_slice(&res[start..end]);
         }
+        nvtx::range_pop!();
     }
 
     pub fn convert_from_icicle_q31(
@@ -810,7 +900,10 @@ impl SecureColumnByCoords<IcicleBackend> {
         output: &mut SecureColumnByCoords<IcicleBackend>,
         d_input: &mut DeviceSlice<QuarticExtensionField>,
     ) {
-        Self::convert_from_icicle(output, unsafe { transmute(d_input) });
+        nvtx::range_push!("pub fn convert_from_icicle_q31(");
+        let ret = Self::convert_from_icicle(output, unsafe { transmute(d_input) });
+        nvtx::range_pop!();
+        ret
     }
 }
 

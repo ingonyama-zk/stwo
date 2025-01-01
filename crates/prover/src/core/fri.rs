@@ -210,6 +210,7 @@ impl<'a, B: FriOps + MerkleOps<MC::H>, MC: MerkleChannel> FriProver<'a, B, MC> {
         fn folded_size(v: &SecureEvaluation<impl PolyOps, BitReversedOrder>) -> usize {
             v.len() >> CIRCLE_TO_LINE_FOLD_STEP
         }
+        nvtx::range_push!("fn commit_inner_layers(");
 
         let circle_poly_folding_alpha = channel.draw_felt();
         let first_inner_layer_log_size = folded_size(&columns[0]).ilog2();
@@ -223,21 +224,27 @@ impl<'a, B: FriOps + MerkleOps<MC::H>, MC: MerkleChannel> FriProver<'a, B, MC> {
         while layer_evaluation.len() > config.last_layer_domain_size() {
             // Check for circle polys in the first layer that should be combined in this layer.
             while let Some(column) = columns.next_if(|c| folded_size(c) == layer_evaluation.len()) {
+                nvtx::range_push!("B::fold_circle_into_line(");
                 B::fold_circle_into_line(
                     &mut layer_evaluation,
                     column,
                     circle_poly_folding_alpha,
                     twiddles,
                 );
+                nvtx::range_pop!();
             }
-
+            nvtx::range_push!("MC::mix_root(");
             let layer = FriInnerLayerProver::new(layer_evaluation);
             MC::mix_root(channel, layer.merkle_tree.root());
+            nvtx::range_pop!();
+            nvtx::range_push!("folded_layer_evaluation");
             let folding_alpha = channel.draw_felt();
             let folded_layer_evaluation = B::fold_line(&layer.evaluation, folding_alpha, twiddles);
+            nvtx::range_pop!();
 
             layer_evaluation = folded_layer_evaluation;
             layers.push(layer);
+            nvtx::range_pop!();
         }
 
         // Check all columns have been consumed.
@@ -361,7 +368,7 @@ impl<MC: MerkleChannel> FriVerifier<MC> {
         column_bounds: Vec<CirclePolyDegreeBound>,
     ) -> Result<Self, FriVerificationError> {
         assert!(column_bounds.is_sorted_by_key(|b| Reverse(*b)));
-
+        nvtx::range_push!("pub fn commit(");
         MC::mix_root(channel, proof.first_layer.commitment);
 
         let max_column_bound = column_bounds[0];
@@ -415,7 +422,7 @@ impl<MC: MerkleChannel> FriVerifier<MC> {
         }
 
         channel.mix_felts(&last_layer_poly);
-
+        nvtx::range_pop!();
         Ok(Self {
             config,
             first_layer,

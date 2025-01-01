@@ -116,6 +116,7 @@ impl<B: Backend> DomainEvaluationAccumulator<B> {
             0,
             "not all random coefficients were used"
         );
+        nvtx::range_push!("pub fn finalize(self)");
         let log_size = self.log_size();
         let _span = span!(Level::INFO, "Constraints interpolation").entered();
         let mut cur_poly: Option<SecureCirclePoly<B>> = None;
@@ -129,6 +130,7 @@ impl<B: Backend> DomainEvaluationAccumulator<B> {
             let Some(mut values) = values else {
                 continue;
             };
+            nvtx::range_push!("for (log_size");
             if let Some(prev_poly) = cur_poly {
                 let mut eval = SecureColumnByCoords {
                     columns: prev_poly.0.map(|c| {
@@ -139,8 +141,11 @@ impl<B: Backend> DomainEvaluationAccumulator<B> {
                         .values
                     }),
                 };
+                nvtx::range_push!("B::accumulate(");
                 B::accumulate(&mut values, &mut eval);
+                nvtx::range_pop!();
             }
+
             cur_poly = Some(SecureCirclePoly(values.columns.map(|c| {
                 CircleEvaluation::<B, BaseField, BitReversedOrder>::new(
                     CanonicCoset::new(log_size as u32).circle_domain(),
@@ -148,12 +153,15 @@ impl<B: Backend> DomainEvaluationAccumulator<B> {
                 )
                 .interpolate_with_twiddles(&twiddles)
             })));
+            nvtx::range_pop!();
         }
-        cur_poly.unwrap_or_else(|| {
+        let ret = cur_poly.unwrap_or_else(|| {
             SecureCirclePoly(std::array::from_fn(|_| {
                 CirclePoly::new(Col::<B, BaseField>::zeros(1 << log_size))
             }))
-        })
+        });
+        nvtx::range_pop!();
+        ret
     }
 }
 

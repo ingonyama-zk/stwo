@@ -172,7 +172,8 @@ mod tests {
 
     #[test_log::test]
     fn test_wide_fib_prove_with_blake() {
-        for log_n_instances in 2..=6 {
+        for log_n_instances in 18..=20 {
+            println!("SIMD: proving for 2^{:?}...", log_n_instances);
             let config = PcsConfig::default();
             // Precompute twiddles.
             let twiddles = SimdBackend::precompute_twiddles(
@@ -205,13 +206,18 @@ mod tests {
                 },
                 (SecureField::zero(), None),
             );
-
+            let start = std::time::Instant::now();
             let proof = prove::<SimdBackend, Blake2sMerkleChannel>(
                 &[&component],
                 prover_channel,
                 commitment_scheme,
             )
             .unwrap();
+            println!(
+            "proving for 2^{:?} took {:?} ms",
+            log_n_instances,
+            start.elapsed().as_millis()
+            );
 
             // Verify.
             let verifier_channel = &mut Blake2sChannel::default();
@@ -236,8 +242,8 @@ mod tests {
         type TheBackend = IcicleBackend;
         // type TheBackend = CpuBackend;
 
-        let min_log = get_env_var("MIN_FIB_LOG", 2u32);
-        let max_log = get_env_var("MAX_FIB_LOG", 18u32);
+        let min_log = get_env_var("MIN_FIB_LOG", 20u32);
+        let max_log = get_env_var("MAX_FIB_LOG", 20u32);
 
         for log_n_instances in min_log..=max_log {
             for _ in 0..1 {
