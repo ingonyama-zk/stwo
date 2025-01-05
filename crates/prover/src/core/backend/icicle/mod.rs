@@ -630,14 +630,17 @@ impl QuotientOps for IcicleBackend {
         //     ))
         // }
 
-        let mut icicle_columns_raw: Vec<IcicleField<1, ScalarCfg>> = vec![];
-        for column in columns {
-            let mut transmuted_values = vec![ScalarField::zero(); column.values.len()];
-            transmuted_values = unsafe { transmute(column.values.clone()) };
-            icicle_columns_raw.append(&mut transmuted_values);
-        }
+        let total_columns_size = columns.iter().fold(0, |acc, column| acc + column.values.len());
+        let mut icicle_device_columns = DeviceVec::cuda_malloc(total_columns_size).unwrap();
+        let mut start = 0;
+        columns.iter().for_each(|column| {
+            let end = start + column.values.len();
+            let device_slice = &mut icicle_device_columns[start..end];
+            let transmuted: Vec<IcicleField<1, ScalarCfg>> = unsafe { transmute(column.values.clone()) };
+            device_slice.copy_from_host(&HostSlice::from_slice(&transmuted));
+            start += column.values.len();
+        });
 
-        let icicle_columns = HostSlice::from_slice(&icicle_columns_raw);
         let icicle_sample_batches = sample_batches
             .into_iter()
             .map(|sample| {
@@ -666,7 +669,7 @@ impl QuotientOps for IcicleBackend {
             domain.half_coset.initial_index.0 as u32,
             domain.half_coset.step_size.0 as u32,
             domain.log_size() as u32,
-            icicle_columns,
+            &icicle_device_columns[..],
             unsafe { transmute(random_coeff) },
             &icicle_sample_batches,
             icicle_result,
