@@ -85,11 +85,9 @@ impl<'a, B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentSchemeProver<'a,
         sampled_points: TreeVec<ColumnVec<Vec<CirclePoint<SecureField>>>>,
         channel: &mut MC::C,
     ) -> CommitmentSchemeProof<MC::H> {
-        #[cfg(feature = "icicle")]
-        nvtx::range_push!("fn prove_values(");
-
         // Evaluate polynomials on open points.
         let span = span!(Level::INFO, "Evaluate columns out of domain").entered();
+        nvtx::range_push!("sample points w/ values");
         let samples = self
             .polynomials()
             .zip_cols(&sampled_points)
@@ -102,40 +100,53 @@ impl<'a, B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentSchemeProver<'a,
                     })
                     .collect_vec()
             });
+        nvtx::range_pop!();
         span.exit();
+        nvtx::range_push!("mix values");
         let sampled_values = samples
             .as_cols_ref()
             .map_cols(|x| x.iter().map(|o| o.value).collect());
         channel.mix_felts(&sampled_values.clone().flatten_cols());
+        nvtx::range_pop!();
 
         // Compute oods quotients for boundary constraints on the sampled points.
         let columns = self.evaluations().flatten();
+        nvtx::range_push!("fri_quotients");
         let quotients = compute_fri_quotients(
             &columns,
             &samples.flatten(),
             channel.draw_felt(),
             self.config.fri_config.log_blowup_factor,
         );
+        nvtx::range_pop!();
 
         // Run FRI commitment phase on the oods quotients.
+        nvtx::range_push!("FRI commit");
         let fri_prover =
             FriProver::<B, MC>::commit(channel, self.config.fri_config, &quotients, self.twiddles);
-
+        nvtx::range_pop!();
+        
         // Proof of work.
+        nvtx::range_push!("Proof of work");
         let span1 = span!(Level::INFO, "Grind").entered();
         let proof_of_work = B::grind(channel, self.config.pow_bits);
         span1.exit();
         channel.mix_u64(proof_of_work);
-
+        nvtx::range_pop!();
+        
         // FRI decommitment phase.
+        nvtx::range_push!("FRI Decommit");
         let (fri_proof, query_positions_per_log_size) = fri_prover.decommit(channel);
-
+        nvtx::range_pop!();
+        
         // Decommit the FRI queries on the merkle trees.
+        nvtx::range_push!("Tree Decommit");
         let decommitment_results = self
             .trees
             .as_ref()
             .map(|tree| tree.decommit(&query_positions_per_log_size));
-
+        nvtx::range_pop!();
+    
         let queried_values = decommitment_results.as_ref().map(|(v, _)| v.clone());
         let decommitments = decommitment_results.map(|(_, d)| d);
 
@@ -147,9 +158,6 @@ impl<'a, B: BackendForChannel<MC>, MC: MerkleChannel> CommitmentSchemeProver<'a,
             proof_of_work,
             fri_proof,
         };
-
-        #[cfg(feature = "icicle")]
-        nvtx::range_pop!();
         result
     }
 }

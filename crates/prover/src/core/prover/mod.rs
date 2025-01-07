@@ -32,7 +32,7 @@ pub fn prove<B: BackendForChannel<MC>, MC: MerkleChannel>(
     #[cfg(feature = "icicle")]
     nvtx::name_thread!("stark_prover");
     #[cfg(feature = "icicle")]
-    nvtx::range_push!("fn prove(");
+    nvtx::range_push!("fn prove");
 
     let n_preprocessed_columns = commitment_scheme.trees[PREPROCESSED_TRACE_IDX]
         .polynomials
@@ -48,25 +48,37 @@ pub fn prove<B: BackendForChannel<MC>, MC: MerkleChannel>(
 
     let span = span!(Level::INFO, "Composition").entered();
     let span1 = span!(Level::INFO, "Generation").entered();
+    nvtx::range_push!("fn compute_composition_polynomial");
     let composition_poly = component_provers.compute_composition_polynomial(random_coeff, &trace);
+    nvtx::range_pop!();
     span1.exit();
 
+    nvtx::range_push!("tree builder + commit");
     let mut tree_builder = commitment_scheme.tree_builder();
     tree_builder.extend_polys(composition_poly.into_coordinate_polys());
+    nvtx::range_push!("commit");
     tree_builder.commit(channel);
+    nvtx::range_pop!();
+    nvtx::range_pop!();
     span.exit();
 
     // Draw OODS point.
+    nvtx::range_push!("Draw OODS point");
     let oods_point = CirclePoint::<SecureField>::get_random_point(channel);
+    nvtx::range_pop!();
 
     // Get mask sample points relative to oods point.
+    nvtx::range_push!("mask sample points");
     let mut sample_points = component_provers.components().mask_points(oods_point);
+    nvtx::range_pop!();
 
     // Add the composition polynomial mask points.
     sample_points.push(vec![vec![oods_point]; SECURE_EXTENSION_DEGREE]);
 
     // Prove the trace and composition OODS values, and retrieve them.
+    nvtx::range_push!("fn prove_values");
     let commitment_scheme_proof = commitment_scheme.prove_values(sample_points, channel);
+    nvtx::range_pop!();
     let proof = StarkProof(commitment_scheme_proof);
     info!(proof_size_estimate = proof.size_estimate());
 

@@ -171,8 +171,13 @@ mod tests {
     }
 
     #[test_log::test]
-    fn test_wide_fib_prove_with_blake() {
-        for log_n_instances in 2..=6 {
+    fn test_wide_fib_prove_with_blake_simd() {
+        use crate::examples::utils::get_env_var;
+
+        let min_log = get_env_var("MIN_FIB_LOG", 2u32);
+        let max_log = get_env_var("MAX_FIB_LOG", 18u32);
+
+        for log_n_instances in min_log..=max_log {
             let config = PcsConfig::default();
             // Precompute twiddles.
             let twiddles = SimdBackend::precompute_twiddles(
@@ -237,77 +242,74 @@ mod tests {
         // type TheBackend = CpuBackend;
 
         let min_log = get_env_var("MIN_FIB_LOG", 2u32);
-        let max_log = get_env_var("MAX_FIB_LOG", 18u32);
+        let max_log = get_env_var("MAX_FIB_LOG", 23u32);
 
         for log_n_instances in min_log..=max_log {
-            for _ in 0..1 {
-                println!("proving for 2^{:?}...", log_n_instances);
-                let config = PcsConfig::default();
-                // Precompute twiddles.
-                let twiddles = TheBackend::precompute_twiddles(
-                    CanonicCoset::new(log_n_instances + 1 + config.fri_config.log_blowup_factor)
-                        .circle_domain()
-                        .half_coset,
-                );
+            let config = PcsConfig::default();
+            // Precompute twiddles.
+            let twiddles = TheBackend::precompute_twiddles(
+                CanonicCoset::new(log_n_instances + 1 + config.fri_config.log_blowup_factor)
+                    .circle_domain()
+                    .half_coset,
+            );
 
-                // Setup protocol.
-                let prover_channel = &mut Blake2sChannel::default();
-                let mut commitment_scheme = CommitmentSchemeProver::<
-                    TheBackend,
-                    Blake2sMerkleChannel,
-                >::new(config, &twiddles);
+            // Setup protocol.
+            let prover_channel = &mut Blake2sChannel::default();
+            let mut commitment_scheme =
+                CommitmentSchemeProver::<TheBackend, Blake2sMerkleChannel>::new(config, &twiddles);
 
-                // Preprocessed trace
-                let mut tree_builder = commitment_scheme.tree_builder();
-                tree_builder.extend_evals([]);
-                tree_builder.commit(prover_channel);
+            // Preprocessed trace
+            let mut tree_builder = commitment_scheme.tree_builder();
+            tree_builder.extend_evals([]);
+            tree_builder.commit(prover_channel);
 
-                // Trace.
-                let trace: Vec<CircleEvaluation<TheBackend, M31, BitReversedOrder>> =
-                    generate_test_trace(log_n_instances)
-                        .iter()
-                        .map(|c| unsafe { std::mem::transmute(c.to_cpu()) })
-                        .collect_vec();
+            // Trace.
+            let trace: Vec<CircleEvaluation<TheBackend, M31, BitReversedOrder>> =
+                generate_test_trace(log_n_instances)
+                    .iter()
+                    .map(|c| unsafe { std::mem::transmute(c.to_cpu()) })
+                    .collect_vec();
 
-                let mut tree_builder = commitment_scheme.tree_builder();
-                tree_builder.extend_evals(trace);
-                tree_builder.commit(prover_channel);
+            let mut tree_builder = commitment_scheme.tree_builder();
+            tree_builder.extend_evals(trace);
+            tree_builder.commit(prover_channel);
 
-                // Prove constraints.
-                let component = WideFibonacciComponent::new(
-                    &mut TraceLocationAllocator::default(),
-                    WideFibonacciEval::<FIB_SEQUENCE_LENGTH> {
-                        log_n_rows: log_n_instances,
-                    },
-                    (SecureField::zero(), None),
-                );
+            // Prove constraints.
+            let component = WideFibonacciComponent::new(
+                &mut TraceLocationAllocator::default(),
+                WideFibonacciEval::<FIB_SEQUENCE_LENGTH> {
+                    log_n_rows: log_n_instances,
+                },
+                (SecureField::zero(), None),
+            );
 
-                let start = std::time::Instant::now();
-                let proof = prove::<TheBackend, Blake2sMerkleChannel>(
-                    &[&component],
-                    prover_channel,
-                    commitment_scheme,
-                )
-                .unwrap();
-                println!(
-                    "proving for 2^{:?} took {:?} ms",
-                    log_n_instances,
-                    start.elapsed().as_millis()
-                );
+            let start = std::time::Instant::now();
+            let proof = prove::<TheBackend, Blake2sMerkleChannel>(
+                &[&component],
+                prover_channel,
+                commitment_scheme,
+            )
+            .unwrap();
+            println!(
+                "proving for 2^{:?} took {:?} ms",
+                log_n_instances,
+                start.elapsed().as_millis()
+            );
 
-                // Verify.
-                let verifier_channel = &mut Blake2sChannel::default();
-                let commitment_scheme =
-                    &mut CommitmentSchemeVerifier::<Blake2sMerkleChannel>::new(config);
+            // Verify.
+            let verifier_channel = &mut Blake2sChannel::default();
+            let commitment_scheme =
+                &mut CommitmentSchemeVerifier::<Blake2sMerkleChannel>::new(config);
 
-                // Retrieve the expected column sizes in each commitment interaction, from the AIR.
-                let sizes = component.trace_log_degree_bounds();
-                commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
-                commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
-                verify(&[&component], verifier_channel, commitment_scheme, proof).unwrap_or_else(|err| {
+            // Retrieve the expected column sizes in each commitment interaction, from the AIR.
+            let sizes = component.trace_log_degree_bounds();
+            commitment_scheme.commit(proof.commitments[0], &sizes[0], verifier_channel);
+            commitment_scheme.commit(proof.commitments[1], &sizes[1], verifier_channel);
+            verify(&[&component], verifier_channel, commitment_scheme, proof).unwrap_or_else(
+                |err| {
                     println!("verify failed for {} with: {}", log_n_instances, err);
-                });
-            }
+                },
+            );
         }
     }
 
