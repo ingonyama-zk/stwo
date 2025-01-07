@@ -527,26 +527,35 @@ impl<E: FrameworkEval + Sync> ComponentProver<IcicleBackend> for FrameworkCompon
             return;
         }
 
+        nvtx::range_push!("create eval domain");
         let eval_domain = CanonicCoset::new(self.max_constraint_log_degree_bound()).circle_domain();
+        nvtx::range_pop!();
+        nvtx::range_push!("create trace domain");
         let trace_domain = CanonicCoset::new(self.eval.log_size());
+        nvtx::range_pop!();
 
+        nvtx::range_push!("component_polys");
         let mut component_polys = trace.polys.sub_tree(&self.trace_locations);
         component_polys[PREPROCESSED_TRACE_IDX] = self
             .preprocessed_column_indices
             .iter()
             .map(|idx| &trace.polys[PREPROCESSED_TRACE_IDX][*idx])
             .collect();
+        nvtx::range_pop!();
 
+        nvtx::range_push!("component_evals");
         let mut component_evals = trace.evals.sub_tree(&self.trace_locations);
         component_evals[PREPROCESSED_TRACE_IDX] = self
             .preprocessed_column_indices
             .iter()
             .map(|idx| &trace.evals[PREPROCESSED_TRACE_IDX][*idx])
             .collect();
+        nvtx::range_pop!();
 
         // Extend trace if necessary.
         // TODO: Don't extend when eval_size < committed_size. Instead, pick a good
         // subdomain. (For larger blowup factors).
+        nvtx::range_push!("extend trace");
         let need_to_extend = component_evals
             .iter()
             .flatten()
@@ -562,22 +571,28 @@ impl<E: FrameworkEval + Sync> ComponentProver<IcicleBackend> for FrameworkCompon
         } else {
             component_evals.clone().map_cols(|c| Cow::Borrowed(*c))
         };
+        nvtx::range_pop!();
 
         // Denom inverses.
+        nvtx::range_push!("denom inverses");
         let log_expand = eval_domain.log_size() - trace_domain.log_size();
         let mut denom_inv = (0..1 << log_expand)
             .map(|i| coset_vanishing(trace_domain.coset(), eval_domain.at(i)).inverse())
             .collect_vec();
         utils::bit_reverse(&mut denom_inv);
+        nvtx::range_pop!();
 
         // Accumulator.
+        nvtx::range_push!("accum");
         let [mut accum] =
             evaluation_accumulator.columns([(eval_domain.log_size(), self.n_constraints())]);
         accum.random_coeff_powers.reverse();
+        nvtx::range_pop!();
 
         let _span = span!(Level::INFO, "Constraint point-wise eval").entered();
 
         let col = accum.col;
+        nvtx::range_push!("eval constr at row loop");
         for row in 0..(1 << eval_domain.log_size()) {
             let trace_cols = trace.as_cols_ref().map_cols(|cow| match cow {
                 Cow::Borrowed(borrowed) => *borrowed,
@@ -600,6 +615,7 @@ impl<E: FrameworkEval + Sync> ComponentProver<IcicleBackend> for FrameworkCompon
             let denom_inv = denom_inv[row >> trace_domain.log_size()];
             col.set(row, col.at(row) + row_res * denom_inv)
         }
+        nvtx::range_pop!();
         accum.col = col;
         return;
     }

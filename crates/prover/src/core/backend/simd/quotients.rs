@@ -67,8 +67,11 @@ impl QuotientOps for SimdBackend {
         // b2 b3 b4 b5 is indeed a circle domain, with a bigger jump.
         // Traversing the domain in bit-reversed order, after we finish with b5, b4, b3, b2,
         // we need to change b1 and then b0. This is the bit reverse of the shift b0 b1.
+        nvtx::range_push!("[SIMD] bit_reverse");
         bit_reverse(&mut subdomain_shifts);
+        nvtx::range_pop!();
 
+        nvtx::range_push!("[SIMD] accumulate_quotients_on_subdomain");
         let (span, mut extended_eval, subeval_polys) = accumulate_quotients_on_subdomain(
             subdomain,
             sample_batches,
@@ -76,12 +79,14 @@ impl QuotientOps for SimdBackend {
             columns,
             domain,
         );
+        nvtx::range_pop!();
 
         // Extend the evaluation to the full domain.
         // TODO(Ohad): Try to optimize out all these copies.
+        nvtx::range_push!("[SIMD] extend to full domain");
         for (ci, &c) in subdomain_shifts.iter().enumerate() {
             let subdomain = subdomain.shift(c);
-
+            
             let twiddles = SimdBackend::precompute_twiddles(subdomain.half_coset);
             #[allow(clippy::needless_range_loop)]
             for i in 0..SECURE_EXTENSION_DEGREE {
@@ -92,8 +97,11 @@ impl QuotientOps for SimdBackend {
             }
         }
         span.exit();
-
-        SecureEvaluation::new(domain, extended_eval)
+        
+        let ret = SecureEvaluation::new(domain, extended_eval);
+        nvtx::range_pop!();
+        
+        ret
     }
 }
 

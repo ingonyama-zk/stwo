@@ -33,7 +33,9 @@ impl FriOps for SimdBackend {
         }
 
         let domain = eval.domain();
+        nvtx::range_push!("[SIMD] domain_line_twiddles_from_tree");
         let itwiddles = domain_line_twiddles_from_tree(domain, &twiddles.itwiddles)[0];
+        nvtx::range_pop!();
 
         let mut folded_values = SecureColumnByCoords::<Self>::zeros(1 << (log_size - 1));
 
@@ -44,14 +46,22 @@ impl FriOps for SimdBackend {
                 let val0 = eval.values.packed_at(vec_index * 2).into_packed_m31s();
                 let val1 = eval.values.packed_at(vec_index * 2 + 1).into_packed_m31s();
                 let pairs: [_; 4] = array::from_fn(|i| {
+                    nvtx::range_push!("[SIMD] deinterleave");
                     let (a, b) = val0[i].deinterleave(val1[i]);
-                    simd_ibutterfly(a, b, std::mem::transmute(twiddle_dbl))
+                    nvtx::range_pop!();
+                    nvtx::range_push!("[SIMD] simd_ibutterfly");
+                    let butterfly = simd_ibutterfly(a, b, std::mem::transmute(twiddle_dbl));
+                    nvtx::range_pop!();
+                    
+                    butterfly
                 });
                 let val0 = PackedSecureField::from_packed_m31s(array::from_fn(|i| pairs[i].0));
                 let val1 = PackedSecureField::from_packed_m31s(array::from_fn(|i| pairs[i].1));
                 val0 + PackedSecureField::broadcast(alpha) * val1
             };
+            nvtx::range_push!("[SIMD] simd_ibutterfly");
             unsafe { folded_values.set_packed(vec_index, value) };
+            nvtx::range_pop!();
         }
 
         LineEvaluation::new(domain.double(), folded_values)
@@ -77,7 +87,9 @@ impl FriOps for SimdBackend {
 
         let domain = src.domain;
         let alpha_sq = alpha * alpha;
+        nvtx::range_push!("[SIMD] domain_line_twiddles_from_tree");
         let itwiddles = domain_line_twiddles_from_tree(domain, &twiddles.itwiddles)[0];
+        nvtx::range_pop!();
 
         for vec_index in 0..(1 << (log_size - 1 - LOG_N_LANES)) {
             let value = unsafe {
@@ -90,13 +102,20 @@ impl FriOps for SimdBackend {
                 let val0 = src.values.packed_at(vec_index * 2).into_packed_m31s();
                 let val1 = src.values.packed_at(vec_index * 2 + 1).into_packed_m31s();
                 let pairs: [_; 4] = array::from_fn(|i| {
+                    nvtx::range_push!("[SIMD] deinterleave");
                     let (a, b) = val0[i].deinterleave(val1[i]);
-                    simd_ibutterfly(a, b, t0)
+                    nvtx::range_pop!();
+                    nvtx::range_push!("[SIMD] simd_ibutterfly");
+                    let butter = simd_ibutterfly(a, b, t0);
+                    nvtx::range_pop!();
+
+                    butter
                 });
                 let val0 = PackedSecureField::from_packed_m31s(array::from_fn(|i| pairs[i].0));
                 let val1 = PackedSecureField::from_packed_m31s(array::from_fn(|i| pairs[i].1));
                 val0 + PackedSecureField::broadcast(alpha) * val1
             };
+            nvtx::range_push!("[SIMD] set packed");
             unsafe {
                 dst.values.set_packed(
                     vec_index,
@@ -104,6 +123,7 @@ impl FriOps for SimdBackend {
                         + value,
                 )
             };
+            nvtx::range_pop!();
         }
     }
 
