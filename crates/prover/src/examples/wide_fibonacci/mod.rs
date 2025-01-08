@@ -283,6 +283,8 @@ mod tests {
                 (SecureField::zero(), None),
             );
 
+            icicle_m31::fri::precompute_fri_twiddles(log_n_instances).unwrap();
+            println!("++++++++ proving for 2^{:?}", log_n_instances);
             let start = std::time::Instant::now();
             let proof = prove::<TheBackend, Blake2sMerkleChannel>(
                 &[&component],
