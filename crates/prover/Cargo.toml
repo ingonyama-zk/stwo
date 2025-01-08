@@ -119,3 +119,6 @@ name = "pcs"
 [[bench]]
 harness = false
 name = "accumulate"
+
+[profile.release]
+opt-level = 3
