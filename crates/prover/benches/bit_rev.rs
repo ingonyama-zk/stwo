@@ -8,7 +8,6 @@ const LOG_SIZE: usize = 28;
 const SIZE: usize = 1 << LOG_SIZE;
 
 pub fn cpu_bit_rev(c: &mut Criterion) {
-
     use stwo_prover::core::backend::cpu::bit_reverse;
     // TODO(andrew): Consider using same size for all.
 

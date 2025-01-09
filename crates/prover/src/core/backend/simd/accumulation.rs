@@ -45,7 +45,10 @@ impl AccumulationOps for SimdBackend {
 mod tests {
     use crate::core::air::accumulation::AccumulationOps;
     use crate::core::backend::cpu::CpuBackend;
+    use crate::core::backend::simd::m31::N_LANES;
+    use crate::core::backend::simd::qm31::PackedSecureField;
     use crate::core::backend::simd::SimdBackend;
+    use crate::core::fields::qm31::SecureField;
     use crate::qm31;
 
     #[test]
@@ -62,5 +65,28 @@ mod tests {
                 n_powers
             );
         });
+    }
+
+    /// Generates the first `n_powers` powers of `felt` using SIMD.
+    /// Refer to `CpuBackend::generate_secure_powers` for the scalar CPU implementation.
+    fn generate_secure_powers(felt: SecureField, n_powers: usize) -> Vec<SecureField> {
+        use itertools::Itertools;
+        let base_arr = <CpuBackend as AccumulationOps>::generate_secure_powers(felt, N_LANES)
+            .try_into()
+            .unwrap();
+        let base = PackedSecureField::from_array(base_arr);
+        let step = PackedSecureField::broadcast(base_arr[N_LANES - 1] * felt);
+        let size = n_powers.div_ceil(N_LANES);
+
+        // Collects the next N_LANES powers of `felt` in each iteration.
+        (0..size)
+            .scan(base, |acc, _| {
+                let res = *acc;
+                *acc *= step;
+                Some(res)
+            })
+            .flat_map(|x| x.to_array())
+            .take(n_powers)
+            .collect_vec()
     }
 }
