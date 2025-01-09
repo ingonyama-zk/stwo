@@ -162,6 +162,11 @@ impl AccumulationOps for IcicleBackend {
             nvtx::range_pop!();
         }
     }
+    
+    fn generate_secure_powers(felt: SecureField, n_powers: usize) -> Vec<SecureField> {
+        //todo!()
+        CpuBackend::generate_secure_powers(felt, n_powers)
+    }
 }
 
 // stwo/crates/prover/src/core/backend/cpu/blake2s.rs
@@ -1089,10 +1094,7 @@ mod tests {
 
         let (values, decommitment) = merkle.decommit(&queries, cols.iter().collect_vec());
 
-        let verifier = MerkleVerifier {
-            root: merkle.root(),
-            column_log_sizes: log_sizes,
-        };
+        let verifier = MerkleVerifier::new(merkle.root(), log_sizes);
 
         verifier.verify(&queries, values, decommitment).unwrap();
     }
