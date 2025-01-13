@@ -175,7 +175,7 @@ mod tests {
         use crate::examples::utils::get_env_var;
 
         let min_log = get_env_var("MIN_FIB_LOG", 2u32);
-        let max_log = get_env_var("MAX_FIB_LOG", 18u32);
+        let max_log = get_env_var("MAX_FIB_LOG", 25u32);
 
         for log_n_instances in min_log..=max_log {
             let config = PcsConfig::default();
@@ -211,12 +211,18 @@ mod tests {
                 (SecureField::zero(), None),
             );
 
+            let start = std::time::Instant::now();
             let proof = prove::<SimdBackend, Blake2sMerkleChannel>(
                 &[&component],
                 prover_channel,
                 commitment_scheme,
             )
             .unwrap();
+            println!(
+                "SIMD proving for 2^{:?} took {:?} ms",
+                log_n_instances,
+                start.elapsed().as_millis()
+            );
 
             // Verify.
             let verifier_channel = &mut Blake2sChannel::default();
@@ -255,10 +261,8 @@ mod tests {
 
             // Setup protocol.
             let prover_channel = &mut Blake2sChannel::default();
-            let mut commitment_scheme = CommitmentSchemeProver::<
-                TheBackend,
-                Blake2sMerkleChannel,
-            >::new(config, &twiddles);
+            let mut commitment_scheme =
+                CommitmentSchemeProver::<TheBackend, Blake2sMerkleChannel>::new(config, &twiddles);
 
             // Preprocessed trace
             let mut tree_builder = commitment_scheme.tree_builder();
@@ -286,7 +290,7 @@ mod tests {
             );
 
             icicle_m31::fri::precompute_fri_twiddles(log_n_instances).unwrap();
-            println!("++++++++ proving for 2^{:?}", log_n_instances);
+
             let start = std::time::Instant::now();
             let proof = prove::<TheBackend, Blake2sMerkleChannel>(
                 &[&component],

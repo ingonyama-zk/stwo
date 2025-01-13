@@ -585,10 +585,6 @@ impl FriOps for IcicleBackend {
         let icicle_alpha = unsafe { transmute(alpha) };
 
         nvtx::range_push!("[ICICLE] fold circle");
-        println!(
-            "index {}, half_log_size {}",
-            domain.half_coset.initial_index.0, domain.half_coset.log_size
-        );
         let _ = fold_circle_into_line_new(
             &d_evals_icicle[..],
             domain.half_coset.initial_index.0 as _,
