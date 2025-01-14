@@ -503,26 +503,8 @@ impl FriOps for IcicleBackend {
 
         let dom_vals_len = length / 2;
 
-        let mut domain_vals = Vec::new();
         let line_domain_log_size = domain.log_size();
-        nvtx::range_push!("[ICICLE] calc domain values");
-        for i in 0..dom_vals_len {
-            // TODO: on-device batch
-            // TODO(andrew): Inefficient. Update when domain twiddles get stored in a buffer.
-            domain_vals.push(ScalarField::from_u32(
-                domain
-                    .at(bit_reverse_index(i << FOLD_STEP, line_domain_log_size))
-                    .inverse()
-                    .0,
-            ));
-        }
-        nvtx::range_pop!();
-
-        nvtx::range_push!("[ICICLE] domain values to device");
-        let domain_icicle_host = HostSlice::from_slice(domain_vals.as_slice());
-        let mut d_domain_icicle = DeviceVec::<ScalarField>::cuda_malloc(dom_vals_len).unwrap();
-        d_domain_icicle.copy_from_host(domain_icicle_host).unwrap();
-        nvtx::range_pop!();
+        
         nvtx::range_push!("[ICICLE] domain evals convert + move");
         let mut d_evals_icicle = DeviceVec::<QuarticExtensionField>::cuda_malloc(length).unwrap();
         SecureColumnByCoords::<IcicleBackend>::convert_to_icicle(
@@ -536,9 +518,11 @@ impl FriOps for IcicleBackend {
         let cfg = FriConfig::default();
         let icicle_alpha = unsafe { transmute(alpha) };
         nvtx::range_push!("[ICICLE] fold_line");
-        let _ = fri::fold_line(
+        let _ = fri::fold_line_new(
             &d_evals_icicle[..],
-            &d_domain_icicle[..],
+            // &d_domain_icicle[..],
+            domain.coset().initial_index.0 as _,
+            domain.coset().log_size,
             &mut d_folded_eval[..],
             icicle_alpha,
             &cfg,
